@@ -1,0 +1,282 @@
+---
+title: "Application Configuration in Quarkus"
+description: "Use @ConfigProperty and @ConfigMapping to inject config, manage profiles (%dev, %prod, %test), override with env vars, and store secrets safely."
+---
+
+Quarkus configuration is built on SmallRye Config, an implementation of the MicroProfile Config specification. Configuration values flow from multiple sources — system properties, environment variables, `.env` files, and `application.properties` — into your application through type-safe injection. This guide covers the most common patterns: injecting individual properties, grouping them into mapping interfaces, working with profiles, and handling secrets.
+
+## Config sources and priority
+
+Quarkus merges configuration from several sources. Higher-ordinal sources take precedence over lower ones:
+
+| Ordinal | Source |
+|---|---|
+| 400 | System properties (`-Dkey=value`) |
+| 300 | Environment variables |
+| 295 | `.env` file in the current working directory |
+| 260 | `$PWD/config/application.properties` |
+| 250 | `application.properties` on the classpath |
+| 100 | `META-INF/microprofile-config.properties` on the classpath |
+
+A property set as an environment variable overrides the same property in `application.properties`. The final configuration is the aggregate of all sources.
+
+## application.properties
+
+The primary configuration file lives at `src/main/resources/application.properties`:
+
+```properties
+# User-defined properties
+greeting.message=hello
+greeting.name=quarkus
+
+# Quarkus built-in property
+quarkus.http.port=9090
+```
+
+<Warning>
+Properties prefixed with `quarkus.` are reserved for Quarkus itself and its extensions. Do not use this prefix for application-specific properties.
+</Warning>
+
+## Injecting with @ConfigProperty
+
+Use `@ConfigProperty` to inject individual configuration values into CDI beans. The `@Inject` annotation is optional when `@ConfigProperty` is present.
+
+```java
+package org.acme.config;
+
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+import java.util.Optional;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
+
+@ApplicationScoped
+public class GreetingService {
+
+    @ConfigProperty(name = "greeting.message")
+    String message;
+
+    @ConfigProperty(name = "greeting.suffix", defaultValue = "!")
+    String suffix;
+
+    @ConfigProperty(name = "greeting.name")
+    Optional<String> name;
+
+    public String greet() {
+        return message + " " + name.orElse("world") + suffix;
+    }
+}
+```
+
+- If a required property (no `defaultValue`, not `Optional`) is missing at startup, Quarkus fails with a `ConfigurationException`.
+- `defaultValue` is used when no value is present in any config source.
+- `Optional<String>` injection results in an empty `Optional` when the property is absent, rather than a failure.
+
+<Note>
+If a property is explicitly set to an empty string in `application.properties` (e.g., `greeting.name=`), the `Optional` will be empty even if a `defaultValue` is defined. The default is only used when the property is entirely absent.
+</Note>
+
+## Grouping config with @ConfigMapping
+
+`@ConfigMapping` is the recommended approach for grouping related properties under a common prefix. Define an interface and annotate it with `@io.smallrye.config.ConfigMapping`:
+
+```java
+import io.smallrye.config.ConfigMapping;
+
+@ConfigMapping(prefix = "server")
+public interface Server {
+    String host();
+
+    int port();
+
+    int sslPort();
+}
+```
+
+With these `application.properties` entries:
+
+```properties
+server.host=localhost
+server.port=8080
+server.ssl-port=8443
+```
+
+Method names are converted to kebab-case for the property lookup: `sslPort()` maps to `server.ssl-port`.
+
+Inject the mapping interface into any CDI bean:
+
+```java
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+
+@ApplicationScoped
+class BusinessBean {
+
+    @Inject
+    Server server;
+
+    void businessMethod() {
+        String host = server.host();
+    }
+}
+```
+
+For non-CDI code, use the programmatic API:
+
+```java
+import org.eclipse.microprofile.config.ConfigProvider;
+import io.smallrye.config.SmallRyeConfig;
+
+SmallRyeConfig config = ConfigProvider.getConfig().unwrap(SmallRyeConfig.class);
+Server server = config.getConfigMapping(Server.class);
+```
+
+## Configuration profiles
+
+Profiles allow different values for the same property depending on the environment. Quarkus activates three built-in profiles automatically:
+
+- **dev** — active during `quarkus:dev`
+- **test** — active when running tests
+- **prod** — active otherwise
+
+Prefix a property with `%{profile}.` to make it profile-specific:
+
+```properties
+# Active in all profiles
+quarkus.http.port=9090
+
+# Overrides the port only in dev mode
+%dev.quarkus.http.port=8181
+```
+
+When the `dev` profile is active, `quarkus.http.port` is `8181`. In production it is `9090`.
+
+Properties without a profile prefix are the fallback when the active profile does not define a value:
+
+```properties
+bar=hello
+baz=bonjour
+%dev.bar=hallo
+```
+
+With the `dev` profile: `bar` is `hallo`, `baz` is `bonjour` (falls back to the unprefixed value).
+
+### Profile-aware files
+
+Profile-specific properties can also live in separate files named `application-{profile}.properties`. Properties in these files do not need profile prefixes:
+
+```properties src/main/resources/application-staging.properties
+quarkus.http.port=9190
+quarkus.http.test-port=9191
+```
+
+### Custom profiles
+
+Create additional profiles by setting `quarkus.profile`:
+
+```properties
+quarkus.http.port=9090
+%staging.quarkus.http.port=9999
+```
+
+Set `quarkus.profile=staging` at runtime to activate the staging profile.
+
+## Environment variables
+
+Environment variable names follow MicroProfile Config conversion rules. For a property `quarkus.datasource.password`, Quarkus accepts:
+
+- `quarkus.datasource.password` (exact match)
+- `quarkus.datasource_password`
+- `QUARKUS_DATASOURCE_PASSWORD`
+
+Set an environment variable for a runner jar:
+
+```bash
+export QUARKUS_DATASOURCE_PASSWORD=youshallnotpass
+java -jar target/quarkus-app/quarkus-run.jar
+```
+
+Or pass it as a system property:
+
+```bash
+java -Dquarkus.datasource.password=youshallnotpass -jar target/quarkus-app/quarkus-run.jar
+```
+
+## Storing secrets
+
+Avoid committing secrets (passwords, API keys, tokens) to version control. Store them in a `.env` file at the project root:
+
+```properties .env
+foo.api-key=ThisIsSecret
+QUARKUS_DATASOURCE_PASSWORD=youshallnotpass
+```
+
+Then add `.env` to `.gitignore`. Quarkus in dev mode picks up `.env` automatically alongside `application.properties`.
+
+<Warning>
+Environment variables defined in `.env` are not accessible via `System.getenv(String)`. Use the config injection or programmatic API instead.
+</Warning>
+
+## Programmatic access
+
+When CDI injection is not available, read configuration values programmatically:
+
+```java
+import org.eclipse.microprofile.config.ConfigProvider;
+import io.smallrye.config.SmallRyeConfig;
+import java.util.Optional;
+
+SmallRyeConfig config = ConfigProvider.getConfig().unwrap(SmallRyeConfig.class);
+String databaseName = config.getValue("database.name", String.class);
+Optional<String> maybeDatabaseName = config.getOptionalValue("database.name", String.class);
+```
+
+<Warning>
+Do not use `System.getProperty(String)` or `System.getenv(String)` to read configuration. These APIs bypass the config system and do not support profiles, expressions, or source priority.
+</Warning>
+
+## Property expressions
+
+Quarkus supports property expressions using `${...}` syntax, resolved when the property is read:
+
+```properties
+remote.host=quarkus.io
+callable.url=https://${remote.host}/
+```
+
+The resolved value of `callable.url` is `https://quarkus.io/`. Expressions work across profile-specific properties too:
+
+```properties
+%dev.application.server=localhost
+application.server=remotehost
+
+quarkus.datasource.jdbc.url=jdbc:mysql://${application.server}:3306/mydatabase?useSSL=false
+```
+
+## Build-time vs. runtime properties
+
+Some Quarkus configuration properties are fixed at build time and cannot be changed without rebuilding the application. These are marked with a lock icon in the all-config reference. Runtime-overridable properties (like database URLs and credentials) can be set via environment variables or system properties without rebuilding.
+
+<AccordionGroup>
+  <Accordion title="Supported config value types">
+    Quarkus automatically converts configuration strings to the target type. Supported types include:
+
+    - Primitives and their boxed equivalents (`boolean`, `int`, `long`, etc.)
+    - `java.util.Optional`, `OptionalInt`, `OptionalLong`, `OptionalDouble`
+    - Java `enum` types
+    - `java.time.Duration`
+    - `java.net.InetAddress`, `java.net.SocketAddress`
+    - `List`, `Set`, `Map` (when using `@ConfigMapping`)
+
+    For boolean values, `"true"`, `"1"`, `"YES"`, `"Y"`, and `"ON"` are all treated as `true`.
+  </Accordion>
+
+  <Accordion title="Multiple active profiles">
+    Multiple profiles can be active simultaneously using a comma-separated list:
+
+    ```properties
+    quarkus.profile=common,dev
+    ```
+
+    When two active profiles define the same property, the last-listed profile wins. For example, with `quarkus.profile=common,dev`, the `dev` profile has higher priority than `common`.
+  </Accordion>
+</AccordionGroup>

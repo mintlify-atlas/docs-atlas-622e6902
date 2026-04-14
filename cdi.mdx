@@ -1,0 +1,369 @@
+---
+title: "Dependency Injection with ArC CDI in Quarkus"
+description: "Learn how Quarkus CDI (ArC) works: bean scopes, @Inject, qualifiers, interceptors, CDI events with @Observes, and programmatic lookup with Instance."
+---
+
+Quarkus implements dependency injection through ArC, its build-time CDI (Contexts and Dependency Injection) container based on the Jakarta CDI 4.1 specification. Rather than resolving dependencies at runtime, ArC performs analysis at build time, catching misconfigured injection points before your application starts. This guide covers the core concepts you need to write and wire beans in a Quarkus application.
+
+## What is a bean?
+
+A bean is a container-managed object that supports dependency injection, lifecycle callbacks, and interceptors. "Container-managed" means you don't control the object's lifecycle directly — the container creates and destroys instances, associates them with a context, and injects them into other beans.
+
+The most common bean type is a class annotated with a scope annotation:
+
+```java
+import jakarta.inject.Inject;
+import jakarta.enterprise.context.ApplicationScoped;
+import io.micrometer.core.annotation.Counted;
+
+@ApplicationScoped
+public class Translator {
+
+    @Inject
+    Dictionary dictionary;
+
+    @Counted(value = "translate.method.counted")
+    String translate(String sentence) {
+      // ...
+    }
+}
+```
+
+## Bean scopes
+
+Every bean has exactly one scope, which determines when instances are created and destroyed. Quarkus supports all built-in CDI scopes except `@ConversationScoped`.
+
+| Annotation | Description |
+|---|---|
+| `@ApplicationScoped` | A single instance shared across the application. Created lazily on first method invocation via a client proxy. |
+| `@Singleton` | Like `@ApplicationScoped` but without a client proxy. Instance created eagerly when first injected. |
+| `@RequestScoped` | Instance tied to the current HTTP request. |
+| `@Dependent` | No sharing — each injection point gets its own instance, destroyed with the injecting bean. |
+| `@SessionScoped` | Backed by `HttpSession`. Requires the `quarkus-undertow` extension. |
+
+<Tip>
+Prefer `@ApplicationScoped` over `@Singleton` by default. `@ApplicationScoped` beans support mocking with `QuarkusMock`, can be destroyed and recreated at runtime, and support injection into narrower scopes. `@Singleton` avoids the proxy indirection and has a slight performance edge, but lacks those capabilities.
+</Tip>
+
+## Injecting dependencies
+
+Use `@Inject` on a field, constructor, or initializer method to declare an injection point. In Quarkus, `@Inject` is not required on the constructor when only one constructor is present.
+
+<CodeGroup>
+
+```java Field injection
+@ApplicationScoped
+public class Translator {
+
+    @Inject
+    Dictionary dictionary;
+}
+```
+
+```java Constructor injection
+@ApplicationScoped
+public class Translator {
+
+    private final TranslatorHelper helper;
+
+    Translator(TranslatorHelper helper) {
+        this.helper = helper;
+    }
+}
+```
+
+```java Initializer injection
+@ApplicationScoped
+public class Translator {
+
+    @Inject
+    void setDeps(Dictionary dic, LocalizationService locService) {
+        // ...
+    }
+}
+```
+
+</CodeGroup>
+
+CDI uses **type-safe resolution**: a bean is matched to an injection point by type. If no bean matches, the build fails with `UnsatisfiedResolutionException`. If multiple beans match, the build fails with `AmbiguousResolutionException`.
+
+## Qualifiers
+
+Qualifiers distinguish between multiple beans of the same type. Declare a qualifier as an annotation meta-annotated with `@jakarta.inject.Qualifier`:
+
+```java
+import jakarta.inject.Qualifier;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
+import static java.lang.annotation.ElementType.*;
+
+@Qualifier
+@Retention(RetentionPolicy.RUNTIME)
+@Target({METHOD, FIELD, PARAMETER, TYPE})
+public @interface Superior {}
+```
+
+Annotate a bean class with the qualifier to make it selectable:
+
+```java
+@Superior
+@ApplicationScoped
+public class SuperiorTranslator extends Translator {
+
+    String translate(String sentence) {
+      // ...
+    }
+}
+```
+
+Inject with the qualifier to select that specific bean:
+
+```java
+@Inject
+@Superior
+Translator translator;
+```
+
+<Note>
+Avoid `@Named` for qualifier-based disambiguation. In CDI, a bean with only `@Named` also receives `@Default`, which causes ambiguity when another unqualified bean of the same type exists.
+</Note>
+
+## Producer methods and fields
+
+Use `@Produces` when you need to control how a bean instance is created, or when integrating a third-party class you can't annotate:
+
+```java
+import jakarta.enterprise.inject.Produces;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.context.Dependent;
+import java.util.ArrayList;
+import java.util.List;
+
+@ApplicationScoped
+public class Producers {
+
+    @Produces
+    double pi = Math.PI;
+
+    @Produces
+    List<String> names() {
+        List<String> names = new ArrayList<>();
+        names.add("Andy");
+        names.add("Adalbert");
+        names.add("Joachim");
+        return names;
+    }
+}
+```
+
+Producer fields and methods with no scope annotation default to `@Dependent`. Other beans can inject the produced values directly:
+
+```java
+@ApplicationScoped
+public class Consumer {
+
+    @Inject
+    double pi;
+
+    @Inject
+    List<String> names;
+}
+```
+
+## Lifecycle callbacks
+
+Use `@PostConstruct` and `@PreDestroy` to run code when a bean is created or destroyed:
+
+```java
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
+import jakarta.enterprise.context.ApplicationScoped;
+
+@ApplicationScoped
+public class Translator {
+
+    @PostConstruct
+    void init() {
+        // called before the bean is put into service
+    }
+
+    @PreDestroy
+    void destroy() {
+        // called before the bean instance is destroyed
+    }
+}
+```
+
+<Tip>
+Keep lifecycle callbacks free of calls to other beans. Dependencies may not yet be fully initialized in `@PostConstruct` or may already be destroyed by the time `@PreDestroy` runs.
+</Tip>
+
+## Interceptors
+
+Interceptors separate cross-cutting concerns (logging, metrics, security) from business logic. Define an interceptor binding annotation, implement the interceptor, then apply the binding to a bean.
+
+<Steps>
+  <Step title="Define an interceptor binding">
+    ```java
+    import java.lang.annotation.*;
+    import jakarta.interceptor.InterceptorBinding;
+
+    @InterceptorBinding
+    @Retention(RetentionPolicy.RUNTIME)
+    @Target({ElementType.TYPE, ElementType.METHOD, ElementType.CONSTRUCTOR})
+    @Inherited
+    public @interface Logged {}
+    ```
+  </Step>
+
+  <Step title="Implement the interceptor">
+    ```java
+    import jakarta.annotation.Priority;
+    import jakarta.interceptor.AroundInvoke;
+    import jakarta.interceptor.Interceptor;
+    import jakarta.interceptor.InvocationContext;
+
+    @Logged
+    @Priority(2020)
+    @Interceptor
+    public class LoggingInterceptor {
+
+        @Inject
+        Logger logger;
+
+        @AroundInvoke
+        Object logInvocation(InvocationContext context) {
+            // log before
+            Object ret = context.proceed();
+            // log after
+            return ret;
+        }
+    }
+    ```
+  </Step>
+
+  <Step title="Apply the binding to a bean">
+    ```java
+    import jakarta.enterprise.context.ApplicationScoped;
+
+    @Logged
+    @ApplicationScoped
+    public class MyService {
+        void doSomething() {
+            // all business methods intercepted
+        }
+    }
+    ```
+  </Step>
+</Steps>
+
+Interceptors with smaller `@Priority` values are called first. A new interceptor instance is created for each intercepted bean instance.
+
+## CDI events and observers
+
+Beans can communicate in a fully decoupled way through CDI events. Any Java object can be an event payload. Fire events with `jakarta.enterprise.event.Event` and observe them with `@Observes`:
+
+```java
+class TaskCompleted {
+    // payload fields
+}
+
+@ApplicationScoped
+class ComplicatedService {
+
+    @Inject
+    Event<TaskCompleted> event;
+
+    void doSomething() {
+        // ...
+        event.fire(new TaskCompleted());
+    }
+}
+
+@ApplicationScoped
+class AuditLogger {
+
+    void onTaskCompleted(@Observes TaskCompleted task) {
+        // handle the event
+    }
+}
+```
+
+The optional qualifiers on the `Event` and `@Observes` parameter act as topic selectors — only observers with matching qualifiers receive the event.
+
+## Programmatic lookup
+
+When you need to resolve a bean at runtime or iterate over all implementations of a type, inject `jakarta.enterprise.inject.Instance`:
+
+```java
+public class Translator {
+
+    @Inject
+    Instance<Dictionary> dictionaries;
+
+    String translate(String sentence) {
+        for (Dictionary dict : dictionaries) {
+            // ...
+        }
+    }
+}
+```
+
+`Instance` extends `Iterable` and does not cause an ambiguous dependency error even when multiple beans implement the type.
+
+## Decorators
+
+Decorators are similar to interceptors but implement the same interfaces as the beans they decorate, allowing them to add business logic:
+
+```java
+import jakarta.decorator.Decorator;
+import jakarta.decorator.Delegate;
+import jakarta.annotation.Priority;
+import jakarta.inject.Inject;
+import jakarta.enterprise.inject.Any;
+import java.math.BigDecimal;
+
+public interface Account {
+    void withdraw(BigDecimal amount);
+}
+
+@Priority(10)
+@Decorator
+public class LargeTxAccount implements Account {
+
+    @Inject
+    @Any
+    @Delegate
+    Account delegate;
+
+    @Inject
+    LogService logService;
+
+    void withdraw(BigDecimal amount) {
+        delegate.withdraw(amount);
+        if (amount.compareTo(BigDecimal.valueOf(1000)) > 0) {
+            logService.logWithdrawal(delegate, amount);
+        }
+    }
+}
+```
+
+<AccordionGroup>
+  <Accordion title="Client proxies explained">
+    Normal-scoped beans (`@ApplicationScoped`, `@RequestScoped`, etc.) are always injected through a generated client proxy. The proxy delegates method invocations to the correct contextual instance. This enables lazy instantiation, injection of narrower-scoped beans into wider-scoped beans, and circular dependency support.
+
+    **Important:** Never read or write fields of a normal-scoped bean directly through an injected reference. Always call methods, so the proxy can route the call to the correct instance.
+  </Accordion>
+
+  <Accordion title="Bean discovery in Quarkus">
+    Quarkus uses a simplified, build-time bean discovery. Only classes annotated with a bean-defining annotation (`@ApplicationScoped`, `@Singleton`, `@RequestScoped`, `@Dependent`, `@Interceptor`, etc.) are discovered by default.
+
+    To include beans from a dependency jar, either add a `beans.xml` file, generate a Jandex index (`META-INF/jandex.idx`), or declare the dependency in `application.properties`:
+
+    ```properties
+    quarkus.index-dependency.acme.group-id=org.acme
+    quarkus.index-dependency.acme.artifact-id=acme-api
+    ```
+  </Accordion>
+</AccordionGroup>

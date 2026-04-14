@@ -1,0 +1,285 @@
+---
+title: "Reactive Messaging in Quarkus with SmallRye"
+description: "Use SmallRye Reactive Messaging in Quarkus to connect to Kafka, Pulsar, RabbitMQ, and AMQP with @Incoming, @Outgoing, and in-memory channels."
+keywords: ["quarkus", "reactive messaging", "smallrye", "kafka", "pulsar", "rabbitmq", "amqp", "channels", "emitter"]
+---
+
+Event-driven messaging has become foundational for modern microservices. Quarkus builds on the [SmallRye Reactive Messaging](https://smallrye.io/smallrye-reactive-messaging/) framework — an implementation of the Eclipse MicroProfile Reactive Messaging specification — to give you a consistent, annotation-driven model for connecting to any supported broker. You don't need deep knowledge of reactive programming to use it; the framework handles the reactive plumbing while you focus on business logic.
+
+## SmallRye Reactive Messaging overview
+
+SmallRye Reactive Messaging introduces a CDI-based programming model. Your application components (CDI beans) declare which channels they read from and write to, and the framework wires them together at startup. Channels are logical names; connectors bind those names to the actual broker topics or queues.
+
+The core dependency for the messaging model is `quarkus-messaging`. Broker-specific connectors are separate extensions layered on top.
+
+```xml
+<dependency>
+    <groupId>io.quarkus</groupId>
+    <artifactId>quarkus-messaging</artifactId>
+</dependency>
+```
+
+## Core annotations
+
+### @Incoming and @Outgoing
+
+`@Incoming` and `@Outgoing` are method-level annotations that declare a CDI bean method as a channel consumer or producer.
+
+```java
+import jakarta.enterprise.context.ApplicationScoped;
+import org.eclipse.microprofile.reactive.messaging.Incoming;
+import org.eclipse.microprofile.reactive.messaging.Outgoing;
+
+@ApplicationScoped
+public class MessageProcessingBean {
+
+    @Incoming("source")
+    @Outgoing("sink")
+    public String process(String payload) {
+        return payload.toUpperCase();
+    }
+}
+```
+
+A method with only `@Outgoing` generates messages into a channel:
+
+```java
+@ApplicationScoped
+public class MessageGeneratorBean {
+
+    @Outgoing("sink")
+    public Multi<String> generate() {
+        return Multi.createFrom().items("a", "b", "c");
+    }
+}
+```
+
+A method with only `@Incoming` terminates the stream by consuming it:
+
+```java
+@ApplicationScoped
+public class MessageConsumerBean {
+
+    @Incoming("source")
+    public void process(String payload) {
+        // handle payload
+    }
+}
+```
+
+<Warning>
+Never call methods annotated with `@Incoming` or `@Outgoing` directly from your own code. They are managed by the framework; calling them directly will not behave as expected.
+</Warning>
+
+### @Channel
+
+`@Channel` is an injection-point annotation used to interact with channels from imperative code. It can inject an `Emitter` for sending or a `Multi` for consuming.
+
+```java
+import org.eclipse.microprofile.reactive.messaging.Channel;
+
+@ApplicationScoped
+@Path("/prices")
+public class SseResource {
+
+    @Channel("prices")
+    Multi<Double> prices;
+
+    @GET
+    @RestStreamElementType(MediaType.TEXT_PLAIN)
+    public Multi<Double> stream() {
+        return prices;
+    }
+}
+```
+
+## Message types
+
+### Payload only
+
+The simplest form — your method receives or returns the raw payload value:
+
+```java
+@Incoming("prices")
+public void consume(double price) {
+    // work with the primitive value directly
+}
+```
+
+### Message\<T\>
+
+Wrapping your parameter in `Message<T>` gives you access to metadata and manual acknowledgment control:
+
+```java
+@Incoming("prices")
+public CompletionStage<Void> consume(Message<Double> msg) {
+    double price = msg.getPayload();
+    // access connector-specific metadata
+    var meta = msg.getMetadata(IncomingKafkaRecordMetadata.class).orElseThrow();
+    return msg.ack();
+}
+```
+
+### Metadata injection
+
+You can also access connector-specific metadata as an additional method parameter without switching to `Message<T>`:
+
+```java
+@Incoming("source")
+@Outgoing("sink")
+public String process(String payload, MyMetadata meta) {
+    Map<String, Object> props = meta.getProperties();
+    return payload.toUpperCase();
+}
+```
+
+## Supported connectors
+
+Each connector is a separate Quarkus extension. Channels are bound to connectors via `application.properties`:
+
+| Connector | Extension artifact |
+|-----------|-------------------|
+| Apache Kafka | `quarkus-messaging-kafka` |
+| Apache Pulsar | `quarkus-messaging-pulsar` |
+| RabbitMQ | `quarkus-messaging-rabbitmq` |
+| AMQP 1.0 | `quarkus-messaging-amqp` |
+| MQTT | `quarkus-messaging-mqtt` |
+
+A minimal channel-to-connector binding looks like this:
+
+```properties
+mp.messaging.incoming.prices.connector=smallrye-kafka
+mp.messaging.incoming.prices.topic=price-updates
+```
+
+<Tip>
+If you have exactly one connector on the classpath, Quarkus automatically attaches orphan channels (those without a matching producer or consumer) to that connector. You can skip the `connector` attribute in most cases.
+</Tip>
+
+## In-memory channels
+
+When a channel has no connector configured, it becomes an in-memory channel. Messages flow directly between the `@Outgoing` producer and the `@Incoming` consumer within the same application process. This is useful for decoupling beans without involving a broker.
+
+```java
+// Producer bean — writes to an in-memory channel
+@Outgoing("internal-prices")
+public Multi<Double> produce() {
+    return Multi.createFrom().ticks().every(Duration.ofSeconds(1))
+        .map(tick -> ThreadLocalRandom.current().nextDouble(100));
+}
+
+// Consumer bean — reads from the same in-memory channel
+@Incoming("internal-prices")
+public void handle(double price) {
+    // process without any broker involved
+}
+```
+
+The framework validates at startup that every in-memory channel has both a producer and a consumer; a missing side causes a deployment error.
+
+## @Blocking for CPU-intensive processing
+
+Reactive Messaging invokes consumer methods on the Vert.x I/O thread by default. For any blocking work — database queries, CPU-intensive computation — annotate the method with `@Blocking` to run it on a worker thread pool:
+
+```java
+import io.smallrye.reactive.messaging.annotations.Blocking;
+import org.eclipse.microprofile.reactive.messaging.Incoming;
+import jakarta.transaction.Transactional;
+
+@ApplicationScoped
+public class PriceStorage {
+
+    @Incoming("prices")
+    @Transactional
+    public void store(int priceInUsd) {
+        Price price = new Price();
+        price.value = priceInUsd;
+        price.persist();
+    }
+}
+```
+
+<Note>
+Methods annotated with `@Transactional` are automatically treated as blocking, even without an explicit `@Blocking` annotation.
+</Note>
+
+There are two `@Blocking` annotations available:
+
+- `io.smallrye.reactive.messaging.annotations.Blocking` — fine-grained control over the worker pool and ordering
+- `io.smallrye.common.annotation.Blocking` — uses the default worker pool and preserves order
+
+## Emitter\<T\> for imperative sending
+
+Use `Emitter<T>` when you need to send messages from code that isn't a reactive pipeline — REST endpoints, scheduled jobs, or any other imperative context:
+
+```java
+import org.eclipse.microprofile.reactive.messaging.Channel;
+import org.eclipse.microprofile.reactive.messaging.Emitter;
+
+@ApplicationScoped
+@Path("/")
+public class PriceEndpoint {
+
+    @Channel("prices")
+    Emitter<Double> emitter;
+
+    @POST
+    @Path("/prices")
+    public CompletionStage<Void> addPrice(double price) {
+        return emitter.send(price);
+    }
+}
+```
+
+For Mutiny-based control, inject `MutinyEmitter<T>`:
+
+```java
+import io.smallrye.reactive.messaging.MutinyEmitter;
+
+@Channel("prices")
+MutinyEmitter<Double> emitter;
+
+public void addPrice(double price) {
+    emitter.sendAndAwait(price);
+}
+```
+
+## Channel configuration
+
+Channel properties follow the `mp.messaging.incoming.<channel>.*` and `mp.messaging.outgoing.<channel>.*` convention:
+
+```properties
+mp.messaging.incoming.source.connector=smallrye-kafka
+mp.messaging.incoming.source.topic=my-topic
+mp.messaging.incoming.source.value.deserializer=org.apache.kafka.common.serialization.StringDeserializer
+mp.messaging.incoming.source.auto.offset.reset=earliest
+```
+
+Global connector defaults use `mp.messaging.connector.<connector-name>.*`:
+
+```properties
+mp.messaging.connector.smallrye-kafka.bootstrap.servers=localhost:9092
+```
+
+Channels can be disabled per build profile:
+
+```properties
+mp.messaging.incoming.my-channel.enabled=false
+```
+
+## Further reading
+
+<CardGroup cols={2}>
+  <Card title="Apache Kafka" icon="bolt" href="/kafka">
+    Produce and consume Kafka records, configure serialization, and use Dev Services.
+  </Card>
+  <Card title="Apache Pulsar" icon="paper-plane" href="/pulsar">
+    Connect to Pulsar with schema support, subscriptions, and Dev Services.
+  </Card>
+  <Card title="Vert.x Event Bus" icon="arrows-left-right" href="/reactive-event-bus">
+    In-process messaging for point-to-point, pub/sub, and request/reply within a single app.
+  </Card>
+  <Card title="SmallRye Reactive Messaging" icon="book" href="https://smallrye.io/smallrye-reactive-messaging/">
+    Full reference for supported method signatures, emitters, and advanced patterns.
+  </Card>
+</CardGroup>

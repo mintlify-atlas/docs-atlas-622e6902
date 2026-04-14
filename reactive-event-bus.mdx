@@ -1,0 +1,304 @@
+---
+title: "In-Process Messaging with the Vert.x Event Bus"
+description: "Use the Quarkus reactive event bus for lightweight in-process messaging between CDI beans, with support for point-to-point, pub/sub, and request/reply patterns."
+keywords: ["quarkus", "vert.x", "event bus", "ConsumeEvent", "in-process messaging", "pub/sub", "request/reply", "CDI"]
+---
+
+The Vert.x Event Bus is a lightweight in-process messaging system built into Quarkus via the `quarkus-vertx` extension. It enables CDI beans to communicate asynchronously through virtual addresses without direct dependencies on each other — a practical tool for decoupling components within a single application.
+
+Unlike [SmallRye Reactive Messaging](/messaging), the event bus is scoped to a single process (unless clustered) and supports request/reply interactions. It doesn't handle streams of events over time, but it excels at fire-and-forget, point-to-point dispatch, and synchronous-feeling request/response patterns between beans.
+
+## Adding the extension
+
+The event bus is part of the `quarkus-vertx` extension:
+
+```bash
+quarkus extension add vertx
+```
+
+<CodeGroup>
+
+```xml pom.xml
+<dependency>
+    <groupId>io.quarkus</groupId>
+    <artifactId>quarkus-vertx</artifactId>
+</dependency>
+```
+
+```gradle build.gradle
+implementation("io.quarkus:quarkus-vertx")
+```
+
+</CodeGroup>
+
+## Consuming events with @ConsumeEvent
+
+Register a CDI bean method as a consumer by annotating it with `@io.quarkus.vertx.ConsumeEvent`. The `value` attribute sets the address the method listens on.
+
+```java
+import io.quarkus.vertx.ConsumeEvent;
+import jakarta.enterprise.context.ApplicationScoped;
+
+@ApplicationScoped
+public class GreetingService {
+
+    @ConsumeEvent("greeting")
+    public String consume(String name) {
+        return name.toUpperCase();
+    }
+}
+```
+
+If no `value` is specified, the address defaults to the fully-qualified class name of the bean (e.g., `org.acme.GreetingService`).
+
+The method parameter is the message body. The return value becomes the reply sent back to the caller — useful for request/reply patterns.
+
+For fire-and-forget consumers that don't need to reply, return `void`:
+
+```java
+@ConsumeEvent("events")
+public void handleEvent(String event) {
+    // process without replying
+}
+```
+
+### Configuring the address
+
+```java
+@ConsumeEvent(value = "greeting")
+public String greet(String name) {
+    return "Hello " + name;
+}
+```
+
+### Working with Vert.x Message directly
+
+When you need access to message headers or the address, accept a `io.vertx.mutiny.core.eventbus.Message<T>` parameter:
+
+```java
+import io.vertx.mutiny.core.eventbus.Message;
+
+@ConsumeEvent("greeting")
+public void consume(Message<String> msg) {
+    System.out.println(msg.address());
+    System.out.println(msg.body());
+}
+```
+
+## Blocking consumers
+
+By default, consumer methods must be non-blocking — they run on the Vert.x event loop. For blocking operations (database queries, CPU-intensive work), mark the consumer as blocking:
+
+```java
+@ConsumeEvent(value = "blocking-consumer", blocking = true)
+public void consumeBlocking(String message) {
+    // safe to block here
+}
+```
+
+Alternatively, use the `@Blocking` annotation from SmallRye:
+
+```java
+import io.smallrye.common.annotation.Blocking;
+
+@ConsumeEvent("blocking-consumer")
+@Blocking
+public void consumeBlocking(String message) {
+    // safe to block here
+}
+```
+
+<Note>
+When `@Blocking` is present, the `blocking` attribute on `@ConsumeEvent` is ignored.
+</Note>
+
+## Asynchronous consumers
+
+Consumers can also return `Uni<T>` or `CompletionStage<T>` for non-blocking async processing:
+
+```java
+import io.smallrye.mutiny.Uni;
+
+@ConsumeEvent("greeting")
+public Uni<String> greetAsync(String name) {
+    return Uni.createFrom().item(() -> "Hello " + name)
+        .emitOn(Infrastructure.getDefaultWorkerPool());
+}
+```
+
+## Sending messages
+
+Inject `io.vertx.mutiny.core.eventbus.EventBus` to send messages from any CDI bean:
+
+```java
+import io.vertx.mutiny.core.eventbus.EventBus;
+import io.vertx.mutiny.core.eventbus.Message;
+import io.smallrye.mutiny.Uni;
+import jakarta.inject.Inject;
+import jakarta.ws.rs.*;
+import jakarta.ws.rs.core.MediaType;
+
+@Path("/async")
+public class EventResource {
+
+    @Inject
+    EventBus bus;
+
+    @GET
+    @Produces(MediaType.TEXT_PLAIN)
+    @Path("{name}")
+    public Uni<String> greeting(String name) {
+        return bus.<String>request("greeting", name)
+            .onItem().transform(Message::body);
+    }
+}
+```
+
+### Delivery modes
+
+The `EventBus` supports four delivery modes:
+
+```java
+// Point-to-point (one consumer receives, round-robin if multiple)
+bus.requestAndForget("greeting", name);
+
+// Publish (all consumers on the address receive the message)
+bus.publish("greeting", name);
+
+// Request/reply — async, returns Uni
+Uni<String> reply = bus.<String>request("greeting", "hello")
+    .onItem().transform(Message::body);
+
+// Request/reply — blocking, waits for response
+String result = bus.<String>requestAndAwait("greeting", name).body();
+```
+
+## Error handling
+
+If a consumer method throws an exception:
+
+- **When a reply handler is set**: the failure is propagated back to the sender as an `io.vertx.core.eventbus.ReplyException` with code `ConsumeEvent#FAILURE_CODE` and the exception message.
+- **When no reply handler is set**: the exception is rethrown (wrapped in a `RuntimeException` if needed) and handled by the Vert.x default exception handler (`io.vertx.core.Vertx#exceptionHandler()`).
+
+## Bridging HTTP and messaging
+
+A common pattern is using the event bus to decouple REST endpoints from business logic beans:
+
+```java
+// REST layer — delegates to service via event bus
+@Path("/async")
+public class EventResource {
+
+    @Inject
+    EventBus bus;
+
+    @GET
+    @Path("{name}")
+    @Produces(MediaType.TEXT_PLAIN)
+    public Uni<String> greeting(String name) {
+        return bus.<String>request("greeting", name)
+            .onItem().transform(Message::body);
+    }
+}
+
+// Business logic — registered as event bus consumer
+@ApplicationScoped
+public class GreetingService {
+
+    @ConsumeEvent("greeting")
+    public String greeting(String name) {
+        return "Hello " + name;
+    }
+}
+```
+
+Request flow:
+1. The REST endpoint receives an HTTP request.
+2. It sends a message to the `greeting` address on the event bus.
+3. `GreetingService` receives the message and returns a reply.
+4. The reply travels back to the endpoint, which writes it to the HTTP response.
+
+## Using codecs
+
+Quarkus registers a default local delivery codec, so you can pass arbitrary objects between beans without custom serialization:
+
+```java
+// Sender
+bus.<String>request("greeting", new MyName(name))
+    .onItem().transform(Message::body);
+
+// Consumer
+@ConsumeEvent("greeting")
+public String greet(MyName name) {
+    return "Hello " + name.getName();
+}
+```
+
+For custom codecs (e.g., for specific serialization formats), specify the codec name explicitly on both ends:
+
+```java
+// Sending with a custom codec
+bus.<String>request("greeting", name,
+    new DeliveryOptions().setCodecName(MyNameCodec.class.getName()));
+
+// Consuming with a custom codec
+@ConsumeEvent(value = "greeting", codec = MyNameCodec.class)
+public String greet(MyName name) {
+    return "Hello " + name.getName();
+}
+```
+
+## Clustered event bus
+
+By default, the event bus is local to a single JVM. To span multiple Quarkus instances, enable clustering. Quarkus supports two cluster managers:
+
+<Tabs>
+  <Tab title="Infinispan">
+    ```xml
+    <dependency>
+        <groupId>io.quarkus</groupId>
+        <artifactId>quarkus-infinispan-client</artifactId>
+    </dependency>
+    ```
+  </Tab>
+  <Tab title="Hazelcast">
+    ```xml
+    <dependency>
+        <groupId>io.quarkiverse.hazelcast</groupId>
+        <artifactId>quarkus-hazelcast-client</artifactId>
+    </dependency>
+    ```
+  </Tab>
+</Tabs>
+
+With clustering enabled, `bus.publish()` and `bus.send()` can reach consumers on other cluster members.
+
+<Warning>
+Clustered event bus delivery uses network I/O and does not guarantee ordering. For cross-service messaging with ordering guarantees, use a broker-backed connector like Kafka or Pulsar instead.
+</Warning>
+
+## Event bus vs. SmallRye Reactive Messaging
+
+Both the event bus and SmallRye Reactive Messaging support async, decoupled communication. The right choice depends on your use case:
+
+| | Vert.x Event Bus | SmallRye Reactive Messaging |
+|--|------|----------|
+| Scope | In-process (or clustered JVMs) | Local or via external broker |
+| Streams | Single events only | Continuous streams with back-pressure |
+| Request/reply | Native support | Not supported |
+| Broker required | No | Yes (except in-memory channels) |
+| Durability | None (in-memory) | Broker-dependent |
+| Best for | Bean-to-bean communication, HTTP delegation | Kafka, Pulsar, AMQP integration |
+
+Use the event bus when you want lightweight, in-process coordination between CDI beans without introducing a broker. Use SmallRye Reactive Messaging when you need to integrate with external messaging infrastructure, handle durable streams, or build event-driven microservices across services.
+
+## Further reading
+
+<CardGroup cols={2}>
+  <Card title="Reactive Messaging overview" icon="diagram-project" href="/messaging">
+    SmallRye Reactive Messaging for broker-backed channels with Kafka, Pulsar, and more.
+  </Card>
+  <Card title="Apache Kafka" icon="bolt" href="/kafka">
+    Produce and consume Kafka records with SmallRye Reactive Messaging.
+  </Card>
+</CardGroup>

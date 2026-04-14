@@ -1,28 +1,11 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
-  "name": "Quarkus",
+  "projectType": "framework",
+  "projectName": "Quarkus",
+  "projectDescription": "A Cloud Native, Container First Java framework for building fast, lightweight microservices and applications optimized for Kubernetes and GraalVM native compilation.",
   "theme": "aspen",
-  "colors": {
-    "primary": "#4b96e8",
-    "light": "#152742",
-    "dark": "#e791a7"
-  },
-  "favicon": "https://media.brand.dev/30576cab-a372-46c0-b3dc-a3db80f93fcf.jpg",
-  "logo": {
-    "light": "https://media.brand.dev/fc824470-1669-484b-abd0-79d12d24ef08.png",
-    "dark": "https://media.brand.dev/fc824470-1669-484b-abd0-79d12d24ef08.png"
-  },
-  "navbar": {
-    "primary": {
-      "type": "github",
-      "href": "https://github.com/quarkusio/quarkus"
-    }
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/quarkusio/quarkus"
-    }
-  },
+  "primaryColor": "#4b96e8",
+  "lightColor": "#152742",
+  "darkColor": "#e791a7",
   "navigation": {
     "tabs": [
       {
@@ -126,5 +109,34 @@
         ]
       }
     ]
-  }
+  },
+  "keyFeatures": [
+    "Container-first design with minimal memory footprint for Kubernetes and cloud environments",
+    "Fast startup via build-time metadata processing and ahead-of-time compilation",
+    "GraalVM native executable compilation for near-instant startup",
+    "Unified imperative and reactive programming models on the same stack",
+    "Extensive extension ecosystem covering REST, data, security, messaging, observability, and more",
+    "Live coding developer mode with hot reload",
+    "Dev Services — automatic zero-config containerized backing services for development",
+    "Standards-based: Jakarta EE, MicroProfile, Eclipse Vert.x, Hibernate, RESTEasy",
+    "Spring API compatibility layer for easy migration",
+    "Built-in support for OpenTelemetry, Micrometer metrics, and distributed tracing"
+  ],
+  "publicApiSurface": [
+    "@ApplicationScoped, @RequestScoped, @Singleton — CDI bean scopes",
+    "@Inject — dependency injection",
+    "@Path, @GET, @POST, @PUT, @DELETE — JAX-RS REST endpoints (RESTEasy)",
+    "@ConfigProperty — configuration injection via MicroProfile Config",
+    "@Transactional — JTA transaction management",
+    "@Entity, @PanacheEntity, @PanacheRepository — Hibernate ORM / Panache data access",
+    "@RolesAllowed, @PermitAll, @DenyAll — security authorization",
+    "@Scheduled — cron and periodic task scheduling",
+    "@Channel, @Incoming, @Outgoing — reactive messaging (SmallRye Reactive Messaging)",
+    "QuarkusTest, @QuarkusIntegrationTest — test framework annotations",
+    "quarkus dev — live coding CLI command",
+    "quarkus build --native — native executable build",
+    "quarkus extension add/list — extension management CLI",
+    "BuildStep — extension build-time augmentation API",
+    "@BuildProducer, @BuildItem — extension build pipeline APIs"
+  ]
 }

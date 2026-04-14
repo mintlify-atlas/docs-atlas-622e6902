@@ -1,0 +1,266 @@
+---
+title: "Securing Quarkus Apps with OIDC"
+description: "Configure OpenID Connect authentication in Quarkus for both bearer token and code flow, integrate with Keycloak or any OIDC provider, and protect endpoints."
+keywords: ["quarkus", "OIDC", "OpenID Connect", "Keycloak", "bearer token", "authorization code flow", "JWT", "security"]
+---
+
+The `quarkus-oidc` extension provides OpenID Connect (OIDC) support for Quarkus applications. It covers two distinct authentication patterns: bearer token authentication for APIs and microservices, and authorization code flow for browser-based web applications. Both patterns use the same extension and share configuration properties, but they operate differently and suit different deployment scenarios.
+
+## The two OIDC flows
+
+<Tabs>
+  <Tab title="Bearer token (APIs)">
+    Bearer token authentication is designed for REST APIs and microservices. Clients — such as single-page applications, mobile apps, or other services — obtain an access token from the OIDC provider independently, then include it in the `Authorization: Bearer <token>` header on every request.
+
+    The Quarkus service validates the token locally by verifying its signature against the provider's public keys, then checks expiry and claim values. No redirects or sessions are involved.
+
+    **Best for:** REST APIs, microservices, service-to-service calls, SPAs backed by a Quarkus service.
+
+    ```properties
+    quarkus.oidc.auth-server-url=http://localhost:8180/realms/quarkus
+    quarkus.oidc.client-id=quarkus-service-app
+    quarkus.oidc.credentials.secret=secret
+    quarkus.oidc.application-type=service
+    ```
+
+    Protect endpoints with `@RolesAllowed`:
+
+    ```java
+    import jakarta.annotation.security.RolesAllowed;
+    import jakarta.inject.Inject;
+    import jakarta.ws.rs.GET;
+    import jakarta.ws.rs.Path;
+    import org.eclipse.microprofile.jwt.JsonWebToken;
+
+    @Path("/api/admin")
+    public class AdminResource {
+
+        @Inject
+        JsonWebToken jwt;
+
+        @GET
+        @RolesAllowed("admin")
+        public String admin() {
+            return "Access for subject " + jwt.getSubject() + " is granted";
+        }
+    }
+    ```
+  </Tab>
+  <Tab title="Authorization code flow (web apps)">
+    Authorization code flow is designed for web applications that serve HTML pages. When an unauthenticated user accesses a protected page, Quarkus redirects them to the OIDC provider's login page. After the user authenticates, the provider redirects back to the application with an authorization code. Quarkus exchanges the code for ID, access, and refresh tokens, then establishes a session.
+
+    **Best for:** Server-rendered web applications, applications requiring SSO, scenarios where the browser is the primary client.
+
+    ```properties
+    quarkus.oidc.auth-server-url=http://localhost:8180/realms/quarkus
+    quarkus.oidc.client-id=quarkus-web-app
+    quarkus.oidc.credentials.secret=secret
+    quarkus.oidc.application-type=web-app
+    ```
+
+    The flow issues three tokens:
+
+    - **ID token** — represents the authenticated user; used to establish the session and provide role-based access
+    - **Access token** — can be used to call downstream APIs on behalf of the user
+    - **Refresh token** — optional; used to obtain new tokens when the ID and access tokens expire
+  </Tab>
+</Tabs>
+
+## Adding the extension
+
+<Tabs>
+  <Tab title="Maven">
+    ```xml
+    <dependency>
+        <groupId>io.quarkus</groupId>
+        <artifactId>quarkus-oidc</artifactId>
+    </dependency>
+    ```
+  </Tab>
+  <Tab title="Gradle">
+    ```groovy
+    implementation("io.quarkus:quarkus-oidc")
+    ```
+  </Tab>
+  <Tab title="CLI">
+    ```bash
+    quarkus extension add quarkus-oidc
+    ```
+  </Tab>
+</Tabs>
+
+## Required configuration
+
+All OIDC applications require at minimum:
+
+```properties
+# The base URL of your OIDC provider (Keycloak realm, Auth0 domain, etc.)
+quarkus.oidc.auth-server-url=http://localhost:8180/realms/quarkus
+
+# Client ID registered with the provider
+quarkus.oidc.client-id=my-app
+
+# Client secret (for client_secret_basic authentication)
+quarkus.oidc.credentials.secret=my-secret
+```
+
+Quarkus discovers the provider's endpoints by appending `/.well-known/openid-configuration` to the `auth-server-url`. If discovery is unavailable, you can configure endpoints manually:
+
+```properties
+quarkus.oidc.auth-server-url=http://localhost:8180/realms/quarkus
+quarkus.oidc.discovery-enabled=false
+quarkus.oidc.authorization-path=/protocol/openid-connect/auth
+quarkus.oidc.token-path=/protocol/openid-connect/token
+quarkus.oidc.jwks-path=/protocol/openid-connect/certs
+quarkus.oidc.end-session-path=/protocol/openid-connect/logout
+```
+
+## Bearer token: token validation and claims mapping
+
+When a request arrives with a `Bearer` token, Quarkus validates it against the provider's public keys fetched from the JWK endpoint. The token's `kid` header identifies which key to use. If no matching key exists locally, Quarkus refreshes the JWK set from the provider. By default, expired keys are refreshed at most every 10 minutes.
+
+After signature verification, Quarkus maps token claims to `SecurityIdentity` roles. The mapping priority is:
+
+1. The claim path set in `quarkus.oidc.roles.role-claim-path` (e.g., `realm_access/roles` or `groups/roles`)
+2. A top-level `groups` claim
+3. Keycloak-specific `realm_access/roles` or `resource_access/<client-id>/roles` claims
+
+```properties
+# Extract roles from a nested claim
+quarkus.oidc.roles.role-claim-path=realm_access/roles
+```
+
+Inject `JsonWebToken` to access claims directly:
+
+```java
+import org.eclipse.microprofile.jwt.JsonWebToken;
+import jakarta.inject.Inject;
+import jakarta.annotation.security.RolesAllowed;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.Path;
+
+@Path("/orders")
+public class OrderResource {
+
+    @Inject
+    JsonWebToken jwt;
+
+    @GET
+    @RolesAllowed("user")
+    public String getOrders() {
+        String subject = jwt.getSubject();
+        String email = jwt.getClaim("email");
+        return "Orders for " + subject;
+    }
+}
+```
+
+You can also use `@PermissionsAllowed` to check OAuth2 scopes from the token:
+
+```java
+import io.quarkus.security.PermissionsAllowed;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.Path;
+
+@Path("/service")
+public class ServiceResource {
+
+    @PermissionsAllowed("orders_read")
+    @GET
+    @Path("/orders")
+    public String listOrders() {
+        return "order list";
+    }
+}
+```
+
+## Authorization code flow: redirect and session management
+
+Set `quarkus.oidc.application-type=web-app` to enable code flow. When an unauthenticated user reaches a protected endpoint, Quarkus redirects them to the authorization endpoint. After the user authenticates, the OIDC provider redirects to your application's callback URL with an authorization code. Quarkus exchanges the code for tokens and creates a session.
+
+If your application serves both HTML pages and a REST API, use `hybrid` mode:
+
+```properties
+# Code flow for browser requests; bearer tokens for API clients
+quarkus.oidc.application-type=hybrid
+```
+
+To enable logout:
+
+```properties
+quarkus.oidc.end-session-path=/protocol/openid-connect/logout
+```
+
+## Dev Services for Keycloak
+
+In development and test mode, Quarkus can automatically start a Keycloak container and configure OIDC without any manual setup. Dev Services creates:
+
+- A `quarkus` realm
+- A `quarkus-app` client with the secret `secret`
+- Two users: `alice` (roles: `admin`, `user`) and `bob` (role: `user`)
+
+```properties
+# Override Dev Services defaults if needed
+quarkus.keycloak.devservices.realm-path=my-realm.json
+quarkus.keycloak.devservices.image-name=quay.io/keycloak/keycloak:latest
+```
+
+To use Dev Services in tests, add the Keycloak test client:
+
+```xml
+<dependency>
+    <groupId>io.quarkus</groupId>
+    <artifactId>quarkus-test-keycloak-server</artifactId>
+    <scope>test</scope>
+</dependency>
+```
+
+Then use `KeycloakTestClient` to obtain tokens in tests:
+
+```java
+import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.keycloak.client.KeycloakTestClient;
+import io.restassured.RestAssured;
+import org.junit.jupiter.api.Test;
+
+@QuarkusTest
+public class BearerTokenAuthenticationTest {
+
+    KeycloakTestClient keycloakClient = new KeycloakTestClient();
+
+    @Test
+    public void testAdminAccess() {
+        RestAssured.given().auth().oauth2(keycloakClient.getAccessToken("alice"))
+                .when().get("/api/admin")
+                .then()
+                .statusCode(200);
+
+        RestAssured.given().auth().oauth2(keycloakClient.getAccessToken("bob"))
+                .when().get("/api/admin")
+                .then()
+                .statusCode(403);
+    }
+}
+```
+
+## OIDC multitenancy
+
+When your application serves multiple clients that each use a different OIDC provider or realm, configure named tenants:
+
+```properties
+# Default tenant
+quarkus.oidc.auth-server-url=http://localhost:8180/realms/default
+quarkus.oidc.client-id=default-app
+quarkus.oidc.credentials.secret=default-secret
+
+# Named tenant
+quarkus.oidc.tenant-a.auth-server-url=http://localhost:8180/realms/tenant-a
+quarkus.oidc.tenant-a.client-id=tenant-a-app
+quarkus.oidc.tenant-a.credentials.secret=tenant-a-secret
+```
+
+Implement a `TenantConfigResolver` CDI bean to select which tenant applies to each incoming request.
+
+<Note>
+`quarkus-oidc` supports both bearer token and authorization code flow. If you only need standalone JWT verification without an OIDC provider (for example, to verify tokens issued by your own service), use `quarkus-smallrye-jwt` instead. See the [JWT Authentication and Token Generation](/security-jwt) guide for details.
+</Note>

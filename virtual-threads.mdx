@@ -1,0 +1,186 @@
+---
+title: "Virtual Threads in Quarkus with Project Loom"
+description: "Run Quarkus REST endpoints and messaging handlers on Java 21 virtual threads for high concurrency without blocking the event loop or writing reactive code."
+---
+
+Virtual threads, introduced as a preview in Java 19 and stabilized in Java 21 (JEP 425), let you write straightforward imperative code while achieving the concurrency characteristics of reactive programming. Quarkus integrates virtual thread support through the `@RunOnVirtualThread` annotation, enabling blocking code to scale without monopolizing platform threads.
+
+## What are virtual threads?
+
+The Java platform has always mapped `Thread` instances to OS threads (called **platform threads**). Each platform thread consumes roughly 1 MB of stack space and a corresponding OS-level resource. For I/O-bound workloads this is wasteful: the thread sits idle while waiting for a network response or database result.
+
+**Virtual threads** are JVM-managed threads that are not tied to a single OS thread:
+
+- **Lightweight** — stack space is allocated on demand ("pay-as-you-go"), so tens of thousands of virtual threads can coexist without memory exhaustion.
+- **Cheap to create** — there is no OS thread allocation on creation. Do not pool them; create a new one per task.
+- **Cheap to block** — when a virtual thread performs a blocking I/O operation, the JVM unmounts it from its carrier thread and parks its state on the heap. The carrier thread is immediately available to run other virtual threads.
+
+### The scheduling model
+
+Virtual threads are scheduled by the JVM. When a virtual thread blocks on I/O, the JVM transparently converts the call into a non-blocking one, unmounts the virtual thread, and mounts a different virtual thread on the same carrier. When the I/O completes the original virtual thread becomes runnable again and is re-mounted — potentially on a different carrier thread. The application code sees none of this; it reads as ordinary sequential code.
+
+### Virtual threads are for I/O-bound workloads only
+
+<Warning>
+Do not use virtual threads for CPU-bound work. A virtual thread running a long computation monopolizes its carrier thread, preventing other virtual threads from running. This can cause the JVM to spin up additional carrier (platform) threads, increasing memory consumption significantly — especially in constrained container environments.
+</Warning>
+
+## Using @RunOnVirtualThread
+
+Quarkus exposes virtual thread dispatch via `@io.smallrye.common.annotation.RunOnVirtualThread`. Adding it to a resource method tells Quarkus to invoke that method on a freshly created virtual thread.
+
+### Prerequisites
+
+- Java 21 or later.
+- A Quarkus extension that supports `@RunOnVirtualThread` (Quarkus REST, Reactive Messaging, gRPC).
+
+Enforce Java 21 in `pom.xml`:
+
+```xml
+<properties>
+  <maven.compiler.source>21</maven.compiler.source>
+  <maven.compiler.target>21</maven.compiler.target>
+</properties>
+```
+
+## Virtual threads in REST endpoints
+
+Add the `quarkus-rest` dependency:
+
+```xml
+<dependency>
+  <groupId>io.quarkus</groupId>
+  <artifactId>quarkus-rest</artifactId>
+</dependency>
+```
+
+Annotate the endpoint method:
+
+```java
+import io.smallrye.common.annotation.RunOnVirtualThread;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.Path;
+
+@Path("/fortunes")
+public class FortuneResource {
+
+    @Inject
+    FortuneRepository repository;
+
+    @GET
+    @Path("/virtual")
+    @RunOnVirtualThread
+    public Fortune virtualThread() {
+        // Runs on a virtual thread.
+        // Blocking calls are fine here — they do not pin a platform thread.
+        var list = repository.findAllAsyncAndAwait();
+        return pickOne(list);
+    }
+}
+```
+
+<Note>
+`@RunOnVirtualThread` can only be applied to methods that are treated as **blocking** by Quarkus REST. Methods returning `Uni<T>` or `Multi<T>` are considered non-blocking and are ineligible. Use a method that returns a plain type, or annotate it with `@Blocking`.
+</Note>
+
+### Three execution models compared
+
+All three models can coexist in a single application. Choose based on your team's familiarity and the requirements of each endpoint.
+
+```java
+@Path("")
+public class FortuneResource {
+
+    @GET
+    @Path("/blocking")
+    public Fortune blocking() {
+        // Worker (platform) thread — simple but limited concurrency
+        return pickOne(repository.findAllBlocking());
+    }
+
+    @GET
+    @Path("/reactive")
+    public Uni<Fortune> reactive() {
+        // Event loop thread — highest concurrency, reactive code
+        return repository.findAllAsync().map(this::pickOne);
+    }
+
+    @GET
+    @Path("/virtual")
+    @RunOnVirtualThread
+    public Fortune virtualThread() {
+        // Virtual thread — simple code, high concurrency
+        return pickOne(repository.findAllAsyncAndAwait());
+    }
+}
+```
+
+| Model | Signature example | Strengths | Trade-offs |
+|---|---|---|---|
+| Blocking on worker thread | `Fortune blocking()` | Simple imperative code | Limited concurrency (bounded thread pool) |
+| Reactive on event loop | `Uni<Fortune> reactive()` | Highest concurrency, lowest memory | Reactive programming model required |
+| Blocking on virtual thread | `@RunOnVirtualThread Fortune vt()` | Simple imperative code, high concurrency | Risk of pinning, monopolization, ThreadLocal bloat |
+
+## Virtual threads in messaging and gRPC
+
+`@RunOnVirtualThread` is also supported on:
+
+- **Reactive Messaging** — annotate `@Incoming` handler methods.
+- **gRPC** — annotate service implementation methods.
+- **Scheduler** — annotate `@Scheduled` methods.
+
+```java
+import io.smallrye.common.annotation.RunOnVirtualThread;
+import org.eclipse.microprofile.reactive.messaging.Incoming;
+
+public class OrderProcessor {
+
+    @Incoming("orders")
+    @RunOnVirtualThread
+    public void process(Order order) {
+        // Blocking processing on a virtual thread
+        orderService.save(order);
+    }
+}
+```
+
+## Limitations and best practices
+
+### Pinning
+
+A virtual thread **pins** its carrier thread (blocks it like a regular platform thread) in certain situations:
+
+- **Java 21–23**: inside a `synchronized` block or method performing blocking I/O.
+- **Java 24+**: when calling native code (JNI / FFM API) that subsequently calls back into Java and blocks. `synchronized` blocks no longer cause pinning on Java 24+ thanks to [JEP 491](https://openjdk.org/jeps/491).
+
+<Tip>
+Prefer `java.util.concurrent.locks.ReentrantLock` over `synchronized` when writing code that may run on virtual threads and needs to target Java 21–23.
+</Tip>
+
+Identify pinning at runtime by setting the JVM flag:
+
+```bash
+-Djdk.tracePinnedThreads=full
+```
+
+### ThreadLocal object bloat
+
+Libraries such as Jackson and Netty use `ThreadLocal` as an object pool — safe when threads are long-lived and recycled, but harmful with virtual threads. Because virtual threads are short-lived and not pooled, `ThreadLocal` objects are allocated fresh for every virtual thread and immediately discarded, leading to high allocation rates and GC pressure. This is a library-level concern; mitigation requires the library to switch to `ScopedValue` or another thread-safe pooling strategy.
+
+### Monopolization
+
+Long-running CPU computations on a virtual thread monopolize the carrier thread and may force the JVM to create additional carrier threads, increasing memory usage. Reserve virtual threads for I/O-bound handlers.
+
+## Comparison with the reactive Mutiny approach
+
+| | Reactive (Mutiny) | Virtual threads |
+|---|---|---|
+| Java version | Any | Java 21+ |
+| Code style | Reactive / functional | Imperative / sequential |
+| Concurrency model | Non-blocking event loop | JVM-scheduled virtual threads |
+| I/O-bound scalability | Excellent | Excellent |
+| CPU-bound scalability | Good | Poor (monopolization risk) |
+| Library compatibility | Wide | Growing (some pinning risks) |
+| Learning curve | Steep | Low |
+
+Both approaches run on top of Vert.x in Quarkus. Virtual threads do not replace the reactive model; they provide an ergonomic alternative for teams that prefer imperative code.

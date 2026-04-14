@@ -1,0 +1,188 @@
+---
+title: "Quarkus Security: Authentication and Authorization"
+description: "Overview of Quarkus Security — authentication mechanisms, identity providers, role-based access control, and key security features for production applications."
+keywords: ["quarkus", "security", "authentication", "authorization", "RBAC", "OIDC", "JWT", "identity"]
+---
+
+Quarkus Security is a framework that provides the architecture, multiple authentication and authorization mechanisms, and tools to build secure, production-quality Java applications. Before adding security to your Quarkus application, it helps to understand the core concepts: how authentication mechanisms interact with identity providers, how `SecurityIdentity` carries authenticated user data, and how authorization decisions are enforced at runtime.
+
+## Authentication mechanisms
+
+Quarkus includes built-in support for several authentication mechanisms. Each mechanism validates incoming credentials and delegates identity resolution to a configured identity provider.
+
+| Mechanism | Use case |
+|---|---|
+| Basic Auth | Simple username/password over HTTP headers |
+| Form-based | HTML login forms for browser-based apps |
+| OIDC Bearer Token | API and microservice protection with access tokens |
+| OIDC Authorization Code Flow | Browser-based SSO with redirect to identity provider |
+| JWT (SmallRye) | Standalone JWT verification without a full OIDC provider |
+| mTLS | Mutual TLS for service-to-service authentication |
+| WebAuthn | Passwordless authentication using hardware keys |
+| OAuth2 | Token introspection against an OAuth2 authorization server |
+
+Enable Basic Auth in `application.properties`:
+
+```properties
+quarkus.http.auth.basic=true
+```
+
+Enable Form-based auth:
+
+```properties
+quarkus.http.auth.form.enabled=true
+quarkus.http.auth.form.login-page=/login
+quarkus.http.auth.form.error-page=/error
+quarkus.http.auth.form.landing-page=/dashboard
+```
+
+## Identity providers
+
+Authentication mechanisms depend on identity providers to verify credentials and produce a `SecurityIdentity`. Quarkus ships with several built-in providers:
+
+- **Jakarta Persistence (JPA)** — verifies credentials against entities in a relational database
+- **JDBC** — verifies credentials with a raw JDBC query
+- **LDAP** — delegates to an LDAP directory
+- **OIDC** — verifies tokens issued by an OpenID Connect provider such as Keycloak
+- **Properties file** — embeds users and roles directly in `application.properties` (useful for development)
+
+You can also implement a custom `IdentityProvider<T>` CDI bean to integrate with any authentication backend.
+
+## Role-based access control
+
+Quarkus supports role-based access control (RBAC) via standard Jakarta security annotations. These work on both REST endpoints and CDI beans.
+
+```java
+import jakarta.annotation.security.RolesAllowed;
+import jakarta.annotation.security.PermitAll;
+import jakarta.annotation.security.DenyAll;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.Path;
+
+@Path("/orders")
+public class OrderResource {
+
+    @GET
+    @PermitAll
+    public String listPublic() {
+        return "public order list";
+    }
+
+    @GET
+    @Path("/my")
+    @RolesAllowed("user")
+    public String listMine() {
+        return "your orders";
+    }
+
+    @GET
+    @Path("/admin")
+    @RolesAllowed({"admin", "manager"})
+    public String adminView() {
+        return "all orders";
+    }
+
+    @GET
+    @Path("/internal")
+    @DenyAll
+    public String blocked() {
+        return "never reached";
+    }
+}
+```
+
+The same annotations work on CDI beans:
+
+```java
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.annotation.security.RolesAllowed;
+
+@ApplicationScoped
+public class ReportService {
+
+    @RolesAllowed("analyst")
+    public Report generateReport() {
+        // only accessible to users with the "analyst" role
+    }
+}
+```
+
+## HTTP permissions in application.properties
+
+You can enforce access policies at the HTTP layer using `quarkus.http.auth.permission.*` without modifying application code. This is useful for coarse-grained path-based policies or when you cannot annotate endpoints directly.
+
+```properties
+# Require authentication for all /api/** paths
+quarkus.http.auth.permission.api.paths=/api/*
+quarkus.http.auth.permission.api.policy=authenticated
+
+# Require the "admin" role for /admin/**
+quarkus.http.auth.permission.admin.paths=/admin/*
+quarkus.http.auth.permission.admin.policy=role-policy-admin
+
+quarkus.http.auth.policy.role-policy-admin.roles-allowed=admin
+
+# Allow unauthenticated access to /public/**
+quarkus.http.auth.permission.public.paths=/public/*
+quarkus.http.auth.permission.public.policy=permit
+```
+
+Permissions are evaluated in definition order. More specific paths should be listed before wildcard paths.
+
+## SecurityIdentity
+
+After authentication succeeds, Quarkus creates a `SecurityIdentity` instance that represents the authenticated user. It holds the principal, roles, credentials, and arbitrary attributes. You can inject it into any CDI bean or REST resource:
+
+```java
+import io.quarkus.security.identity.SecurityIdentity;
+import jakarta.inject.Inject;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.Path;
+import jakarta.annotation.security.RolesAllowed;
+
+@Path("/profile")
+public class ProfileResource {
+
+    @Inject
+    SecurityIdentity identity;
+
+    @GET
+    @RolesAllowed("user")
+    public String profile() {
+        String name = identity.getPrincipal().getName();
+        boolean isAdmin = identity.hasRole("admin");
+        return "Hello " + name + (isAdmin ? " (admin)" : "");
+    }
+}
+```
+
+`SecurityIdentity` is `@RequestScoped`, so each injection point always reflects the current request's authenticated user.
+
+## Additional security features
+
+Quarkus Security provides several capabilities beyond authentication and authorization:
+
+- **Proactive authentication** — tokens and credentials are verified on every request, even for unauthenticated endpoints, so `SecurityIdentity` is always available
+- **CORS filter** — configure cross-origin resource sharing to allow browser clients on different domains
+- **CSRF prevention** — a Quarkus REST filter protects form-based applications from cross-site request forgery attacks
+- **SameSite cookies** — apply the `SameSite` cookie attribute to any cookie set by a Quarkus endpoint
+- **Secure serialization** — limit JSON fields included in responses based on the caller's roles
+- **Secrets engines** — integrate with HashiCorp Vault and other secrets managers for credential storage
+- **Security vulnerability detection** — Quarkus tags are registered in the NIST National Vulnerability Database
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="Securing Quarkus Apps with OIDC" href="/security-oidc">
+    Configure OpenID Connect bearer token and authorization code flow authentication with Keycloak or any OIDC provider.
+  </Card>
+  <Card title="JWT Authentication and Token Generation" href="/security-jwt">
+    Use SmallRye JWT to verify incoming JWT tokens and generate signed tokens with role-based access control.
+  </Card>
+  <Card title="Testing Secured Quarkus Endpoints" href="/security-testing">
+    Write tests for secured applications using @TestSecurity, @OidcSecurity, and WireMock.
+  </Card>
+  <Card title="Security Testing" href="/security-testing">
+    Test secured endpoints with @TestSecurity, mock OIDC tokens, and WireMock.
+  </Card>
+</CardGroup>

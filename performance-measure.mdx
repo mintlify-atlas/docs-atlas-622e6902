@@ -1,0 +1,243 @@
+---
+title: "Measuring Quarkus Application Performance"
+description: "Benchmark Quarkus startup time, memory footprint, and request throughput for both JVM and native modes to understand and optimize application performance."
+---
+
+Quarkus is designed to reduce startup time and memory footprint compared to traditional Java frameworks. To take full advantage of these improvements — and to verify them in your own application — you need to measure the right metrics in the right way. This guide covers how Quarkus benchmarks are conducted and how to apply the same methodology to your own applications.
+
+## What to measure
+
+Performance benchmarking for a Quarkus application involves four key metrics:
+
+| Metric | Description | Why it matters |
+|---|---|---|
+| **Startup time** | Time from process start to first successful HTTP response | Critical for auto-scaling and serverless deployments |
+| **RSS memory** | Resident Set Size of the running process | Used by container orchestrators for scheduling and OOM decisions |
+| **First request time** | Latency of the very first request after start | Reveals lazy initialization hidden in startup time |
+| **Throughput / latency** | Sustained requests-per-second and tail latencies | Determines production capacity |
+
+## Measuring RSS memory
+
+<Warning>
+Do not use `docker stats` or tools derived from it (e.g., `ctop`) to measure memory. These tools report only a subset of resident pages. Linux cgroups and Kubernetes use the full RSS when making OOM kill decisions, so `docker stats` produces misleading numbers.
+</Warning>
+
+RSS measures all memory pages actually loaded into RAM, including heap, class metadata, thread stacks, compiled code, and GC structures. It reflects what the OS — and your container runtime — actually accounts for.
+
+### Measuring on Linux
+
+```bash
+ps -o pid,rss,command -p <pid>
+```
+
+For a detailed memory map:
+
+```bash
+pmap -x <pid>
+```
+
+Example output:
+
+```
+13150: /data/quarkus-application -Xmx100m -Xmn70m
+Address           Kbytes     RSS   Dirty Mode  Mapping
+0000000000400000   55652   30592       0 r-x-- quarkus-application
+...
+---------------- ------- ------- -------
+total kB         9726508  256092  220900
+```
+
+The `total kB` RSS line is the number to record.
+
+### Measuring on macOS
+
+```bash
+ps x -o pid,rss,command -p <pid>
+```
+
+RSS is reported in kilobytes (1024 bytes).
+
+### Measuring inside Docker
+
+Use `docker top` with explicit formatting:
+
+```bash
+docker top <container_id> -o pid,rss,args
+```
+
+Example:
+
+```bash
+$ docker top $(docker ps -q --filter ancestor=quarkus/myapp) -o pid,rss,args
+
+PID     RSS     COMMAND
+2531    27m     ./application -Dquarkus.http.host=0.0.0.0
+```
+
+Alternatively, from a privileged host shell:
+
+```bash
+docker run -it --rm --privileged --pid=host justincormack/nsenter1 \
+  /bin/ps -e -o pid,rss,args | grep application
+```
+
+### Native Memory Tracking (JVM mode)
+
+For JVM-mode applications, the HotSpot Native Memory Tracking feature provides a detailed breakdown:
+
+```bash
+# Start the application with NMT enabled
+java -XX:NativeMemoryTracking=summary -jar target/quarkus-run.jar
+
+# Dump the report
+jcmd <pid> VM.native_memory summary scale=MB
+```
+
+<Note>
+NMT adds a 5–10% runtime overhead. Use it only during profiling, not in production.
+</Note>
+
+## Measuring startup time
+
+Startup time is defined as the elapsed time from when the process is launched to when the first HTTP request succeeds. This "time to first request" metric captures any lazy initialization that happens after the application reports itself as started.
+
+### Manual measurement
+
+Start a polling loop in one terminal before launching the application:
+
+```bash
+while [[ "$(curl -s -o /dev/null -w '%{http_code}' localhost:8080/api/greeting)" != "200" ]]; do
+  sleep .00001
+done
+```
+
+In a second terminal, launch the application and capture the timestamps:
+
+```bash
+date +"%T.%3N" && ./target/quarkus-timing-runner
+```
+
+Example output:
+
+```
+10:57:32.508
+10:57:32.512
+2019-04-05 10:57:32,512 INFO  [io.quarkus] Quarkus started in 0.002s.
+10:57:32.537
+```
+
+The difference between the first and last timestamps (29 ms here) is the true startup-to-first-request time.
+
+## JVM mode benchmarking
+
+JVM mode benefits from JIT compilation, so throughput improves over time as hot paths are compiled. For throughput and latency measurements, allow a warm-up period before recording numbers.
+
+```bash
+# Build in JVM mode
+./mvnw package
+
+# Run
+java -jar target/quarkus-run.jar
+```
+
+Use a load testing tool that accounts for the coordinated omission problem (see below) during warm-up and measurement phases.
+
+## Native mode benchmarking
+
+Native executables start immediately and reach peak performance faster than JVM mode, but have no JIT — throughput is fixed at compilation time.
+
+```bash
+# Build native
+./mvnw package -Dnative
+
+# Run
+./target/*-runner
+```
+
+### GraalVM flags applied by Quarkus
+
+Quarkus passes several flags to `native-image` by default. These affect performance comparisons with other frameworks or hand-built native images:
+
+| Flag | Effect |
+|---|---|
+| `-H:FallbackThreshold=0` | Disables fallback to JVM mode. Build fails rather than silently falling back. |
+| `-H:-SpawnIsolates` | Disables GraalVM Isolates (not used by Quarkus). |
+| `-H:-UseServiceLoaderFeature` | Disables auto-registration of all `ServiceLoader` implementations. Quarkus registers only what is needed, producing smaller and faster binaries. |
+
+<Tip>
+To inspect the exact `native-image` invocation for your build, check the build plugin log output. The full command line is printed during native compilation.
+</Tip>
+
+## Key metrics comparison
+
+A representative comparison between JVM and native mode for a minimal Quarkus REST application (results vary by hardware and application complexity):
+
+| Metric | JVM mode | Native mode |
+|---|---|---|
+| Startup time | ~800 ms | ~10 ms |
+| RSS at idle | ~150 MB | ~25 MB |
+| First request latency | Low (after JIT warm-up) | Low (immediately) |
+| Peak throughput | High (JIT-optimized) | Moderate (AOT-compiled) |
+
+## Throughput and latency testing
+
+### Avoid the coordinated omission problem
+
+Many popular load testing tools suffer from the **coordinated omission problem**: when the system under test is slow, the tool stops sending new requests and doesn't account for the queuing delay in its latency calculations. This produces optimistic latency histograms that do not reflect real-world user experience.
+
+Tools **not** suitable for latency measurement:
+
+- JMeter
+- wrk
+
+Tools that correctly account for coordinated omission:
+
+- [wrk2](https://github.com/giltene/wrk2)
+- [HyperFoil](https://hyperfoil.io)
+
+<Warning>
+Even with correct tools, understand what each metric means. A tool measuring "response time" may or may not include queuing time. Read the documentation for the tool you use.
+</Warning>
+
+## Optimization tips
+
+### Maximize build-time initialization
+
+Quarkus moves as much work as possible to build time. Ensure your extensions are doing the same. Avoid patterns that force runtime initialization of classes that could be initialized at build time.
+
+### Minimize reflection usage
+
+Every class registered for reflection increases the native binary size and disables some GraalVM optimizations. Prefer build-time processing (e.g., annotation processors, Quarkus extensions) over runtime reflection.
+
+### Prune unused extensions
+
+Each extension adds startup work, memory overhead, and binary size. Audit your `pom.xml` dependencies periodically and remove extensions your application does not use.
+
+```bash
+# List installed extensions
+quarkus extension list --installed
+```
+
+### Use native-image profiles
+
+Separate your native configuration from your JVM configuration using Maven profiles:
+
+```xml
+<profile>
+  <id>native</id>
+  <properties>
+    <quarkus.native.enabled>true</quarkus.native.enabled>
+  </properties>
+</profile>
+```
+
+### Set explicit memory limits for containers
+
+Always specify memory limits in your container deployment. This prevents the JVM or native runtime from sizing its heap based on the full host memory:
+
+```properties
+# JVM mode: limit heap
+quarkus.jvm.additional-args=-Xmx256m
+
+# Native mode: heap is sized by GraalVM heuristics; constrain at the container level
+```

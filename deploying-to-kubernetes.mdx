@@ -1,0 +1,246 @@
+---
+title: "Deploying Quarkus Applications to Kubernetes"
+description: "Generate Kubernetes manifests automatically, deploy Quarkus apps to Kubernetes or Minikube, and configure health probes, resource limits, and ConfigMaps."
+keywords: ["quarkus", "kubernetes", "deployment", "manifests", "minikube", "health probes", "configmap"]
+---
+
+Quarkus can automatically generate Kubernetes manifests at build time using the `quarkus-kubernetes` extension, which is backed by [Dekorate](https://github.com/dekorateio/dekorate/). You get a `Deployment` and a `Service` out of the box, and a wide set of properties lets you customize replicas, resource limits, health probes, environment injection, and more—all from `application.properties`.
+
+## Adding the extension
+
+Add `quarkus-kubernetes` together with a container image extension (Jib is a common choice):
+
+<Tabs>
+  <Tab title="Maven">
+    ```xml pom.xml
+    <dependency>
+        <groupId>io.quarkus</groupId>
+        <artifactId>quarkus-kubernetes</artifactId>
+    </dependency>
+    <dependency>
+        <groupId>io.quarkus</groupId>
+        <artifactId>quarkus-container-image-jib</artifactId>
+    </dependency>
+    ```
+  </Tab>
+  <Tab title="Gradle">
+    ```groovy build.gradle
+    implementation("io.quarkus:quarkus-kubernetes")
+    implementation("io.quarkus:quarkus-container-image-jib")
+    ```
+  </Tab>
+  <Tab title="Quarkus CLI">
+    ```bash
+    quarkus extension add kubernetes container-image-jib
+    ```
+  </Tab>
+</Tabs>
+
+## Auto-generated manifests
+
+Every build produces `kubernetes.json` and `kubernetes.yml` inside `target/kubernetes/`. The files contain a `Deployment` and a `ClusterIP` `Service` by default:
+
+```yaml target/kubernetes/kubernetes.yml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: my-app
+    app.kubernetes.io/version: 1.0.0-SNAPSHOT
+    app.kubernetes.io/managed-by: quarkus
+  name: my-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: my-app
+      app.kubernetes.io/version: 1.0.0-SNAPSHOT
+  template:
+    spec:
+      containers:
+        - image: yourDockerUsername/my-app:1.0.0-SNAPSHOT
+          imagePullPolicy: Always
+          name: my-app
+---
+apiVersion: v1
+kind: Service
+spec:
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  type: ClusterIP
+```
+
+Apply the manifest to your cluster:
+
+```bash
+kubectl apply -f target/kubernetes/kubernetes.json
+```
+
+To apply to a specific namespace:
+
+```bash
+kubectl apply -f target/kubernetes/kubernetes.json -n my-namespace
+```
+
+## Key configuration properties
+
+All configuration lives in `src/main/resources/application.properties`.
+
+### Namespace, replicas, and image pull policy
+
+```properties application.properties
+# Pin a namespace in the generated manifests (omit to let kubectl decide)
+quarkus.kubernetes.namespace=my-namespace
+
+# Scale to 3 replicas
+quarkus.kubernetes.replicas=3
+
+# Control the container image pull policy
+quarkus.container-image.registry=my.registry.net
+quarkus.container-image.group=myorg
+quarkus.container-image.name=my-app
+quarkus.container-image.tag=1.0
+```
+
+### Resource limits
+
+```properties application.properties
+quarkus.kubernetes.resources.requests.memory=64Mi
+quarkus.kubernetes.resources.requests.cpu=250m
+quarkus.kubernetes.resources.limits.memory=512Mi
+quarkus.kubernetes.resources.limits.cpu=1000m
+```
+
+### Idempotent manifests for GitOps
+
+By default, generated manifests include a build timestamp and commit ID that change on every build, which causes unnecessary diffs in GitOps workflows. To produce stable manifests:
+
+```properties application.properties
+quarkus.kubernetes.idempotent=true
+```
+
+## Health probe integration
+
+Readiness and liveness probes are **not** added by default. Add `quarkus-smallrye-health` and Quarkus will automatically wire up the probes to the SmallRye Health endpoints:
+
+<Tabs>
+  <Tab title="Maven">
+    ```xml pom.xml
+    <dependency>
+        <groupId>io.quarkus</groupId>
+        <artifactId>quarkus-smallrye-health</artifactId>
+    </dependency>
+    ```
+  </Tab>
+  <Tab title="Gradle">
+    ```groovy build.gradle
+    implementation("io.quarkus:quarkus-smallrye-health")
+    ```
+  </Tab>
+</Tabs>
+
+The probe paths follow `quarkus.smallrye-health.root-path`, `quarkus.smallrye-health.liveness-path`, and `quarkus.smallrye-health.readiness-path`. You can tune the timing:
+
+```properties application.properties
+quarkus.kubernetes.readiness-probe.initial-delay=20s
+quarkus.kubernetes.readiness-probe.period=45s
+```
+
+## Service and Ingress generation
+
+The extension generates a `ClusterIP` `Service` by default. To expose your application externally via an `Ingress`:
+
+```properties application.properties
+quarkus.kubernetes.ingress.expose=true
+quarkus.kubernetes.ingress.host=prod.svc.example.com
+```
+
+To add TLS termination via a secret:
+
+```properties application.properties
+quarkus.kubernetes.ingress.expose=true
+quarkus.kubernetes.ingress.tls.my-tls-secret.enabled=true
+```
+
+## ConfigMap and Secret injection
+
+### Inject all keys from a ConfigMap or Secret as environment variables
+
+```properties application.properties
+quarkus.kubernetes.env.configmaps=my-config-map,another-config-map
+quarkus.kubernetes.env.secrets=my-secret,my-other-secret
+```
+
+### Map a single key to a named environment variable
+
+```properties application.properties
+quarkus.kubernetes.env.mapping.db-password.from-secret=my-secret
+quarkus.kubernetes.env.mapping.db-password.with-key=password
+```
+
+### Mount a ConfigMap or Secret as application configuration
+
+When you want Quarkus itself to read configuration from a mounted volume, use the shorthand properties. Quarkus handles the volume, mount, and `SMALLRYE_CONFIG_LOCATIONS` environment variable automatically:
+
+```properties application.properties
+quarkus.kubernetes.app-config-map=my-app-config
+quarkus.kubernetes.app-secret=my-app-secret
+```
+
+The files are mounted at `/mnt/app-config-map` and `/mnt/app-secret` respectively.
+
+## Deploy during build
+
+Set `quarkus.kubernetes.deploy=true` to build the container image, push it to the registry, generate manifests, and apply them to the cluster in a single Maven or Gradle invocation:
+
+```bash
+./mvnw clean package -Dquarkus.kubernetes.deploy=true
+```
+
+Or set it permanently in `application.properties` for a CI pipeline:
+
+```properties application.properties
+quarkus.kubernetes.deploy=true
+```
+
+<Warning>
+The cluster must be reachable from the machine running the build. The extension uses the current `kubectl` context to determine where to deploy.
+</Warning>
+
+## Minikube tips
+
+The `quarkus-minikube` extension generates manifests (`minikube.yaml` / `minikube.json`) tuned for local development: `imagePullPolicy: IfNotPresent` and `NodePort` instead of `ClusterIP`.
+
+<Steps>
+  <Step title="Add the extension">
+    ```xml pom.xml
+    <dependency>
+        <groupId>io.quarkus</groupId>
+        <artifactId>quarkus-minikube</artifactId>
+    </dependency>
+    ```
+  </Step>
+  <Step title="Point Docker at Minikube's daemon">
+    Build your image directly into Minikube so no registry is needed:
+    ```bash
+    eval $(minikube -p minikube docker-env)
+    ./mvnw clean package -Dquarkus.container-image.build=true
+    ```
+  </Step>
+  <Step title="Apply the Minikube manifest">
+    ```bash
+    kubectl apply -f target/kubernetes/minikube.yaml
+    ```
+  </Step>
+  <Step title="Access the service">
+    ```bash
+    minikube service my-app
+    ```
+  </Step>
+</Steps>
+
+<Tip>
+If you are using Docker Desktop, microk8s, or another local Kubernetes variant that doesn't have a dedicated Quarkus extension, `quarkus-minikube` defaults are reasonable for most environments.
+</Tip>

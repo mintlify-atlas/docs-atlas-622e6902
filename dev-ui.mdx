@@ -1,0 +1,229 @@
+---
+title: "Quarkus Dev UI: Developer Console"
+description: "Explore the Quarkus Dev UI at /q/dev-ui to inspect extensions, edit live configuration, run continuous tests, and view Dev Services info in dev mode."
+keywords: ["quarkus", "dev ui", "developer console", "dev mode", "continuous testing", "configuration editor", "dev services", "extensions"]
+---
+
+The Quarkus Dev UI is a browser-based developer console that comes to life when you run your application in development mode. It lets you explore your application's internals, edit configuration live, monitor test results, inspect Dev Services, and navigate extension-specific tools — all without restarting or modifying your code.
+
+## Accessing Dev UI
+
+Start your application in dev mode:
+
+```bash
+# Maven
+./mvnw quarkus:dev
+
+# Gradle
+./gradlew quarkusDev
+
+# CLI
+quarkus dev
+```
+
+Then open your browser at:
+
+```
+http://localhost:8080/q/dev-ui
+```
+
+Alternatively, press `d` in the terminal where dev mode is running to open the Dev UI in your default browser automatically.
+
+<Warning>
+Dev UI is only available in development mode. It is not included in production builds.
+</Warning>
+
+## Layout overview
+
+The Dev UI has four main areas:
+
+- **Left sidebar (Menu)** — navigation to built-in pages and extension-contributed pages
+- **Main panel (Page)** — content for the selected page
+- **Footer** — live log output from the server and Dev Services
+- **Settings** — theme, locale, storage management, and extension settings
+
+### Left sidebar
+
+| Menu item | Description |
+|-----------|-------------|
+| **Extensions** | Cards for every Quarkus extension active in the project |
+| **Configuration** | Browse and edit all configuration properties |
+| **Workspace** | In-browser file browser and editor |
+| **Endpoints** | All HTTP endpoints (REST, GraphQL, internal) |
+| **Continuous Testing** | Test runner status, results, and controls |
+| **Dev Services** | Info about automatically started services (databases, Kafka, etc.) |
+| **Build Metrics** | Performance data from the last build and reload cycle |
+| **Readme** | Your project's `README.md`, if present |
+| **Dependencies** | Runtime and deployment dependency tree with search |
+
+<Tip>
+Drag a page link from an extension card into the sidebar menu to bookmark it for quick access.
+</Tip>
+
+### Extension cards
+
+The **Extensions** page displays a card for every Quarkus extension active in your project. Each card provides:
+
+- Extension name and description
+- A link to the online guide for that extension
+- Quick access to the configuration editor filtered to that extension's keys
+- Links to any custom pages the extension contributes
+- The version of the underlying library (e.g. Hibernate, SmallRye Health)
+
+Click a page link on a card to open that extension's dedicated UI. Examples include the Swagger UI from `quarkus-rest`, the GraphQL UI from `quarkus-smallrye-graphql`, the ArC bean browser from `quarkus-arc`, and the Hibernate SQL log viewer from `quarkus-hibernate-orm`.
+
+### Footer
+
+The footer displays live log output while the application runs. The default tab shows the standard Quarkus server log. Additional tabs appear based on which extensions are active:
+
+- **HTTP** — incoming HTTP request log (when `quarkus-rest` or similar is present)
+- **GraphQL** — GraphQL request log
+- **Scheduler** — scheduled job execution log
+- **Dev Services** — log output from started containers (databases, Kafka, etc.)
+
+This live view lets you monitor behavior and debug issues without switching to the terminal.
+
+## Configuration editor
+
+The **Configuration** page gives you a searchable, editable view of all Quarkus configuration properties.
+
+- **Text mode** — edit `application.properties` directly in a browser-based editor; changes take effect on the next hot reload
+- **Form mode** — browse properties grouped by extension with their current values, defaults, and documentation
+- **Extension filter** — click the Configuration shortcut on any extension card to jump directly to that extension's keys
+
+Changes made in the configuration editor are written to `application.properties` and picked up by the hot reload cycle.
+
+## Continuous testing
+
+The **Continuous Testing** panel shows the status of your test suite as it runs automatically in the background. From this panel you can:
+
+- See which tests are passing, failing, or skipped
+- View test output and stack traces for failures
+- Manually trigger a test run
+- Pause or resume continuous testing
+
+Press `r` in the dev mode terminal to manually trigger a test run, or `p` to pause and resume continuous testing.
+
+<Tip>
+For the best continuous testing experience with Quarkus, use the Quarkus CLI or Maven. Gradle's daemon mode limits the interactive test output display.
+</Tip>
+
+## Dev Services
+
+The **Dev Services** page shows information about services that Quarkus started automatically for you — typically via Testcontainers. Common Dev Services include:
+
+- PostgreSQL, MySQL, or other databases
+- Kafka or RabbitMQ brokers
+- Redis instances
+- Keycloak for OIDC
+
+For each service you can see the container image used, the port mappings, and any configuration properties that were injected automatically. This helps you connect external tools (such as a database client) to the service running during development.
+
+## Extension-specific pages
+
+Many extensions contribute their own pages to the Dev UI. Examples include:
+
+| Extension | Page |
+|-----------|------|
+| `quarkus-rest` / `quarkus-smallrye-openapi` | Swagger UI — try HTTP endpoints interactively |
+| `quarkus-smallrye-graphql` | GraphQL UI — run queries and mutations |
+| `quarkus-arc` | Bean browser — inspect CDI beans, observers, and interceptors |
+| `quarkus-hibernate-orm` | SQL log viewer, schema generation tools |
+| `quarkus-smallrye-health` | Live health check results |
+| `quarkus-scheduler` | Scheduled job list and manual trigger |
+| `quarkus-cache` | Cache statistics and invalidation |
+| `quarkus-kafka-client` | Topic browser and message viewer |
+
+## How extensions contribute to Dev UI
+
+Extensions contribute to the Dev UI through build steps that produce specific build items. All extension contributions are scoped to local development mode via `@BuildStep(onlyIf = IsLocalDevelopment.class)`.
+
+### Card pages
+
+The most common contribution — links shown directly on the extension's card:
+
+```java
+@BuildStep(onlyIf = IsLocalDevelopment.class)
+void createCardPage(BuildProducer<CardPageBuildItem> cardsProducer) {
+    CardPageBuildItem card = new CardPageBuildItem();
+
+    card.addPage(Page.webComponentPageBuilder()
+            .title("My Tool")
+            .icon("font-awesome-solid:wrench")
+            .componentLink("qwc-my-extension-tool.js"));
+
+    cardsProducer.produce(card);
+}
+```
+
+The `componentLink` points to a JavaScript file in `deployment/src/main/resources/dev-ui/` that defines a Web Component using [Lit](https://lit.dev/).
+
+### Menu pages
+
+Add a page to the left sidebar alongside built-in items:
+
+```java
+@BuildStep(onlyIf = IsLocalDevelopment.class)
+void createMenuPage(BuildProducer<MenuPageBuildItem> menuProducer) {
+    MenuPageBuildItem menuItem = new MenuPageBuildItem();
+
+    menuItem.addPage(Page.webComponentPageBuilder()
+            .title("My Dashboard")
+            .icon("font-awesome-solid:gauge")
+            .componentLink("qwc-my-extension-dashboard.js"));
+
+    menuProducer.produce(menuItem);
+}
+```
+
+### Footer log tabs
+
+Stream live log output to a footer tab:
+
+```java
+@BuildStep(onlyIf = IsLocalDevelopment.class)
+void createFooterLog(BuildProducer<FooterLogBuildItem> footerProducer) {
+    footerProducer.produce(new FooterLogBuildItem("My Extension Log", () -> {
+        return myLogPublisher(); // returns Flow.Publisher<String>
+    }));
+}
+```
+
+### Passing build-time data to pages
+
+Extension build steps can pass data collected at build time to the web component running in the browser:
+
+```java
+card.addBuildTimeData("endpoints", endpointsBuildItem.getEndpoints());
+```
+
+The key is automatically namespaced so there are no collisions between extensions. Access it in your web component via the scoped data API.
+
+### Extension metadata
+
+For your extension to appear in the Dev UI with correct information, add a `quarkus-extension.yaml` to `src/main/resources/META-INF/` of the runtime module:
+
+```yaml
+name: "My Extension"
+description: "Does something useful in Quarkus applications"
+guide: "https://quarkus.io/guides/my-extension"
+metadata:
+  categories:
+    - "data"
+  config:
+    - "quarkus.my-extension"
+```
+
+The `config` list controls which configuration keys are shown when a user clicks Configuration on your extension's card.
+
+## Settings
+
+Open the Settings dialog from the gear icon in the Dev UI to access:
+
+- **Theme** — switch between light, dark, and system theme
+- **Locale** — change the display language
+- **Storage** — view and clear browser-local Dev UI storage
+- **Dev MCP** — enable the MCP server that exposes dev mode capabilities to AI tools
+- Extension-contributed settings tabs
+
+Extensions can contribute their own settings tabs by producing a `SettingPageBuildItem` in a build step.

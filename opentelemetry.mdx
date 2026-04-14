@@ -1,0 +1,241 @@
+---
+title: "Distributed Tracing and Metrics with OpenTelemetry"
+description: "Instrument Quarkus applications with OpenTelemetry for distributed tracing, custom metrics, and OTLP export to Jaeger, Grafana Tempo, or any OTLP collector."
+keywords: ["opentelemetry", "tracing", "metrics", "OTLP", "Jaeger", "Tempo", "spans", "instrumentation", "quarkus-opentelemetry"]
+---
+
+[OpenTelemetry](https://opentelemetry.io/) is a vendor-neutral observability framework for creating and exporting telemetry data. The `quarkus-opentelemetry` extension integrates it directly into Quarkus, providing automatic instrumentation for common libraries and a clean API for adding custom spans and metrics to your own code.
+
+<Note>
+The OpenTelemetry Java Agent is not needed and not recommended with Quarkus. Quarkus extensions instrument frameworks directly, and the agent does not work in native mode.
+</Note>
+
+## Add the extension
+
+<Tabs>
+  <Tab title="Maven">
+    ```xml
+    <dependency>
+        <groupId>io.quarkus</groupId>
+        <artifactId>quarkus-opentelemetry</artifactId>
+    </dependency>
+    ```
+  </Tab>
+  <Tab title="Gradle">
+    ```groovy
+    implementation("io.quarkus:quarkus-opentelemetry")
+    ```
+  </Tab>
+  <Tab title="Quarkus CLI">
+    ```bash
+    quarkus extension add opentelemetry
+    ```
+  </Tab>
+</Tabs>
+
+## Signals
+
+<Tabs>
+  <Tab title="Tracing">
+
+### Automatic instrumentation
+
+Once the extension is on the classpath, Quarkus instruments the following automatically—no annotations or code changes required:
+
+- Inbound and outbound HTTP requests (RESTEasy, REST Client)
+- Database queries (Hibernate ORM, Panache, reactive clients)
+- Messaging (Kafka, AMQP via SmallRye Reactive Messaging)
+- gRPC calls
+
+Every incoming HTTP request produces a root span. Downstream calls become child spans in the same trace, letting you visualize the full request path in Jaeger, Grafana Tempo, or any OTLP-compatible backend.
+
+### Custom spans with `@WithSpan`
+
+To create a span around a method call, annotate it with `@WithSpan`:
+
+```java
+import io.opentelemetry.instrumentation.annotations.WithSpan;
+import io.opentelemetry.instrumentation.annotations.SpanAttribute;
+
+@ApplicationScoped
+public class OrderService {
+
+    @WithSpan("process-order")
+    public Order processOrder(@SpanAttribute("order.id") String orderId) {
+        // This method body runs inside its own span.
+        // The orderId parameter is recorded as a span attribute.
+        return findOrder(orderId);
+    }
+}
+```
+
+### Programmatic span control
+
+Inject `Tracer` when you need full control over span lifecycle:
+
+```java
+import io.opentelemetry.api.trace.Tracer;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.api.trace.StatusCode;
+import jakarta.inject.Inject;
+
+@ApplicationScoped
+public class PaymentService {
+
+    @Inject
+    Tracer tracer;
+
+    public void chargeCard(String customerId, long amount) {
+        Span span = tracer.spanBuilder("charge-card")
+                .setAttribute("customer.id", customerId)
+                .setAttribute("payment.amount", amount)
+                .startSpan();
+        try (var scope = span.makeCurrent()) {
+            // perform charge
+        } catch (Exception e) {
+            span.setStatus(StatusCode.ERROR, e.getMessage());
+            span.recordException(e);
+            throw e;
+        } finally {
+            span.end();
+        }
+    }
+}
+```
+
+### Sampler configuration
+
+By default, all traces are sampled (`parentbased_always_on`). In production you will usually want a probabilistic sampler:
+
+```properties
+# Sample 10 % of traces
+quarkus.otel.traces.sampler=parentbased_traceidratio
+quarkus.otel.traces.sampler.arg=0.1
+```
+
+Available sampler values: `always_on`, `always_off`, `traceidratio`, `parentbased_always_on`, `parentbased_always_off`, `parentbased_traceidratio`.
+
+  </Tab>
+  <Tab title="Metrics">
+
+### Enable OTel metrics
+
+OpenTelemetry metrics are disabled by default (tech preview). Enable them at build time:
+
+```properties
+quarkus.otel.metrics.enabled=true
+```
+
+<Note>
+For production-grade automatic metrics instrumentation, consider using the `quarkus-micrometer-opentelemetry` extension. It combines Micrometer (which has wider automatic instrumentation coverage) with OpenTelemetry export.
+</Note>
+
+### Custom metrics with `MeterRegistry`
+
+Inject `MeterProvider` or use the OpenTelemetry Metrics API to create instruments:
+
+```java
+import io.opentelemetry.api.metrics.Meter;
+import io.opentelemetry.api.metrics.LongCounter;
+import io.opentelemetry.api.OpenTelemetry;
+import jakarta.inject.Inject;
+
+@ApplicationScoped
+public class InventoryService {
+
+    private final LongCounter itemsSold;
+
+    @Inject
+    public InventoryService(OpenTelemetry openTelemetry) {
+        Meter meter = openTelemetry.getMeter("inventory-service");
+        itemsSold = meter.counterBuilder("items.sold")
+                .setDescription("Total number of items sold")
+                .setUnit("{item}")
+                .build();
+    }
+
+    public void recordSale(String productId, long quantity) {
+        itemsSold.add(quantity,
+                io.opentelemetry.api.common.Attributes.of(
+                        io.opentelemetry.api.common.AttributeKey.stringKey("product.id"), productId));
+    }
+}
+```
+
+You can also create histograms (for latency distributions) and observable gauges (for values that are measured on demand, such as queue depth).
+
+  </Tab>
+</Tabs>
+
+## Configure the OTLP exporter
+
+```properties
+# Endpoint for all signals (traces, metrics, logs)
+quarkus.otel.exporter.otlp.endpoint=http://localhost:4317
+
+# Optional: per-signal endpoints
+quarkus.otel.exporter.otlp.traces.endpoint=http://tempo:4317
+quarkus.otel.exporter.otlp.metrics.endpoint=http://otel-collector:4317
+
+# Optional: authentication header (e.g. for Honeycomb or Grafana Cloud)
+quarkus.otel.exporter.otlp.headers=x-honeycomb-team=YOUR_API_KEY
+```
+
+The exporter uses gRPC (`application/grpc`) over HTTP/2 by default. Switch to HTTP/1.1 protobuf if your collector requires it:
+
+```properties
+quarkus.otel.exporter.otlp.protocol=http/protobuf
+```
+
+## Resource attributes
+
+Resource attributes describe the entity producing telemetry. They appear on every span and metric point exported from your application.
+
+```properties
+quarkus.otel.resource.attributes=service.name=order-service,service.version=2.3.0,deployment.environment=production
+```
+
+`service.name` defaults to the Quarkus `quarkus.application.name` property if not set explicitly.
+
+## Export to popular backends
+
+<Tabs>
+  <Tab title="Jaeger">
+    Jaeger accepts OTLP directly since version 1.35. Point the exporter at the Jaeger collector:
+
+    ```properties
+    quarkus.otel.exporter.otlp.endpoint=http://jaeger-collector:4317
+    ```
+
+    The Jaeger UI is typically available at `http://localhost:16686`.
+  </Tab>
+  <Tab title="Grafana Tempo">
+    Grafana Tempo exposes an OTLP gRPC port. Configure a `tempo.yaml` receiver and point Quarkus at it:
+
+    ```properties
+    quarkus.otel.exporter.otlp.endpoint=http://tempo:4317
+    ```
+
+    In development, use the `quarkus-observability-devservices-lgtm` extension to start Tempo automatically.
+  </Tab>
+  <Tab title="Honeycomb">
+    Honeycomb accepts OTLP via HTTP. Set the endpoint and API key header:
+
+    ```properties
+    quarkus.otel.exporter.otlp.endpoint=https://api.honeycomb.io
+    quarkus.otel.exporter.otlp.headers=x-honeycomb-team=YOUR_API_KEY
+    quarkus.otel.exporter.otlp.protocol=http/protobuf
+    ```
+  </Tab>
+</Tabs>
+
+## Disable or limit the extension
+
+| Property | Default | Effect |
+|---|---|---|
+| `quarkus.otel.enabled` | `true` | Disable the entire extension at build time |
+| `quarkus.otel.sdk.disabled` | `false` | Disable the OTel SDK at runtime without rebuilding |
+| `quarkus.otel.traces.enabled` | `true` | Disable tracing at build time |
+| `quarkus.otel.metrics.enabled` | `false` | Enable/disable metrics at build time |
+| `quarkus.otel.logs.enabled` | `false` | Enable/disable log export at build time |
+| `quarkus.otel.exporter.otlp.enabled` | `true` | Disable all OTLP exporters (telemetry still generated, just not sent) |

@@ -1,0 +1,341 @@
+---
+title: "Quarkus Maven Plugin Reference"
+description: "Use the Quarkus Maven plugin for dev mode, build, test, and image generation — with all goals, configuration properties, and multi-module project support."
+keywords: ["quarkus", "maven", "plugin", "dev mode", "build", "native", "uber-jar", "bom"]
+---
+
+The Quarkus Maven plugin drives the full development lifecycle from a Maven project: scaffolding new apps, managing extensions, running dev mode with hot reload, packaging JVM and native artifacts, and running tests. If you are starting a new project, the fastest path is the [Quarkus CLI](/tooling), which delegates to this plugin under the hood.
+
+## Plugin coordinates
+
+Add the plugin to your `pom.xml`:
+
+```xml
+<plugin>
+  <groupId>io.quarkus.platform</groupId>
+  <artifactId>quarkus-maven-plugin</artifactId>
+  <version>${quarkus.platform.version}</version>
+  <extensions>true</extensions>
+</plugin>
+```
+
+Setting `<extensions>true</extensions>` registers a `MavenLifecycleParticipant` that ensures Quarkus classloaders are properly closed after the build, and enables the `quarkus` packaging type.
+
+## Bill of Materials (BOM)
+
+Import the Quarkus BOM in `<dependencyManagement>` so you do not need to specify versions on individual Quarkus dependencies:
+
+```xml
+<dependencyManagement>
+  <dependencies>
+    <dependency>
+      <groupId>io.quarkus.platform</groupId>
+      <artifactId>quarkus-bom</artifactId>
+      <version>${quarkus.platform.version}</version>
+      <type>pom</type>
+      <scope>import</scope>
+    </dependency>
+  </dependencies>
+</dependencyManagement>
+```
+
+## Creating a new project
+
+Scaffold a new Maven project without installing anything:
+
+```bash
+mvn io.quarkus.platform:quarkus-maven-plugin:3.x.x:create \
+    -DprojectGroupId=org.acme \
+    -DprojectArtifactId=my-app \
+    -Dextensions="rest,hibernate-orm,jdbc-postgresql"
+```
+
+Key creation parameters:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `projectGroupId` | `org.acme.sample` | Group ID of the generated project |
+| `projectArtifactId` | _(required)_ | Artifact ID; omitting it triggers interactive mode |
+| `projectVersion` | `1.0.0-SNAPSHOT` | Version of the generated project |
+| `extensions` | `[]` | Comma-separated list of extensions to include |
+| `javaVersion` | `17` | Java version to target |
+| `className` | _(not created)_ | Fully-qualified name of the generated REST resource |
+| `path` | `/hello` | Resource path, only used when `className` is set |
+| `buildTool` | `maven` | Set to `gradle` or `gradle-kotlin-dsl` for Gradle projects |
+
+The project is placed in a directory named after `projectArtifactId`. Dockerfiles for JVM and native mode are generated in `src/main/docker`.
+
+## Managing extensions
+
+List all available extensions from inside a project:
+
+```bash
+./mvnw quarkus:list-extensions
+```
+
+Add an extension:
+
+```bash
+./mvnw quarkus:add-extensions -Dextensions=hibernate-validator
+```
+
+Extensions are resolved loosely — `agroal`, `Agroal`, and `io.quarkus:quarkus-agroal` all refer to the same artifact. Glob patterns are supported:
+
+```bash
+./mvnw quarkus:add-extensions -Dextensions="smallrye-*"
+```
+
+## Development mode
+
+### Starting dev mode
+
+```bash
+./mvnw quarkus:dev
+```
+
+Dev mode starts your application and watches for changes. Saving a Java source file or resource triggers background recompilation and redeployment — the next browser request picks up the changes with no manual restart.
+
+Pass application arguments via `-Dquarkus.args`:
+
+```bash
+./mvnw quarkus:dev -Dquarkus.args="--foo bar"
+```
+
+Stop dev mode with `Ctrl+C`.
+
+### Debugging
+
+Dev mode starts with JDWP debug listening on port `5005` by default (JVM not suspended). Control this with the `debug` system property:
+
+| Value | Behavior |
+|-------|----------|
+| `false` | Disable debug mode |
+| `true` | Listen on port `5005` |
+| `{port}` | Listen on the specified port |
+| `client` | Connect to `localhost:5005` as a client |
+
+To suspend the JVM until a debugger attaches:
+
+```bash
+./mvnw quarkus:dev -Dsuspend -Ddebug
+```
+
+Then connect your IDE debugger to `localhost:5005`.
+
+### Customizing compiler options
+
+The plugin reads compiler flags from `maven-compiler-plugin` by default. To add custom flags:
+
+```xml
+<plugin>
+  <groupId>io.quarkus.platform</groupId>
+  <artifactId>quarkus-maven-plugin</artifactId>
+  <version>${quarkus.platform.version}</version>
+  <extensions>true</extensions>
+  <configuration>
+    <source>${maven.compiler.source}</source>
+    <target>${maven.compiler.target}</target>
+    <compilerArgs>
+      <arg>--enable-preview</arg>
+    </compilerArgs>
+    <jvmArgs>--enable-preview</jvmArgs>
+  </configuration>
+</plugin>
+```
+
+<Note>
+If your extensions or the plugin itself need to pass JVM flags to the Maven process, set them via the `MAVEN_OPTS` environment variable or create a `.mvn/jvm.config` file at your project root.
+</Note>
+
+## Building
+
+### JVM build
+
+```bash
+./mvnw package
+```
+
+The default package type is `fast-jar`. The output is placed in `target/quarkus-app/`. Run it with:
+
+```bash
+java -jar target/quarkus-app/quarkus-run.jar
+```
+
+<Warning>
+The entire `quarkus-app` directory must be present for the application to start. Do not move just the JAR file.
+</Warning>
+
+### Uber-Jar
+
+Bundle all dependencies into a single executable JAR:
+
+```bash
+./mvnw package -Dquarkus.package.jar.type=uber-jar
+```
+
+The uber-jar is written to `target/` with a `-runner` suffix by default. The original thin jar is renamed with an `.original` suffix.
+
+To exclude signature files or specific entries:
+
+```properties
+# application.properties
+quarkus.package.ignored-entries=META-INF/BC1024KE.SF,META-INF/BC1024KE.DSA
+```
+
+### Native executable
+
+<Steps>
+  <Step title="Ensure GraalVM is installed">
+    Set `GRAALVM_HOME` to point to a compatible GraalVM distribution, or use the container-based build in the next step.
+  </Step>
+  <Step title="Add the native profile to pom.xml">
+    ```xml
+    <profiles>
+      <profile>
+        <id>native</id>
+        <properties>
+          <quarkus.native.enabled>true</quarkus.native.enabled>
+        </properties>
+      </profile>
+    </profiles>
+    ```
+  </Step>
+  <Step title="Build the native executable">
+    ```bash
+    ./mvnw package -Pnative
+    ```
+    The binary is placed in `target/`.
+  </Step>
+</Steps>
+
+To build a container-friendly 64-bit Linux executable without a local GraalVM installation:
+
+```bash
+./mvnw package -Pnative -Dquarkus.native.container-build=true
+```
+
+The build runs inside Docker using the `quay.io/quarkus/ubi9-quarkus-mandrel-builder-image` image.
+
+### Generating code
+
+Extensions that produce code at build time (e.g. Panache, gRPC) use the `generate-code` and `generate-code-tests` goals, which are bound automatically when `<extensions>true</extensions>` is set. You typically do not invoke these manually.
+
+## Key plugin goals
+
+| Goal | Description |
+|------|-------------|
+| `quarkus:dev` | Start development mode with hot reload |
+| `quarkus:build` | Package the application (delegates to `package` lifecycle) |
+| `quarkus:test` | Run tests in dev mode (continuous testing) |
+| `quarkus:remote-dev` | Connect local changes to a remote dev-mode instance |
+| `quarkus:add-extensions` | Add one or more extensions to the project |
+| `quarkus:remove-extensions` | Remove extensions from the project |
+| `quarkus:list-extensions` | List available extensions |
+| `quarkus:generate-code` | Generate build-time code from extensions |
+| `quarkus:dependency-tree` | Display the Quarkus build classpath tree |
+| `quarkus:go-offline` | Download all dependencies for offline builds |
+
+## Full pom.xml configuration
+
+A minimal but complete `pom.xml` for a Quarkus project:
+
+```xml
+<packaging>quarkus</packaging>
+
+<properties>
+  <quarkus.platform.group-id>io.quarkus.platform</quarkus.platform.group-id>
+  <quarkus.platform.version>3.x.x</quarkus.platform.version>
+  <surefire-plugin.version>3.x.x</surefire-plugin.version>
+  <skipITs>true</skipITs>
+</properties>
+
+<dependencyManagement>
+  <dependencies>
+    <dependency>
+      <groupId>${quarkus.platform.group-id}</groupId>
+      <artifactId>quarkus-bom</artifactId>
+      <version>${quarkus.platform.version}</version>
+      <type>pom</type>
+      <scope>import</scope>
+    </dependency>
+  </dependencies>
+</dependencyManagement>
+
+<build>
+  <plugins>
+    <plugin>
+      <groupId>${quarkus.platform.group-id}</groupId>
+      <artifactId>quarkus-maven-plugin</artifactId>
+      <version>${quarkus.platform.version}</version>
+      <extensions>true</extensions>
+    </plugin>
+    <plugin>
+      <groupId>org.apache.maven.plugins</groupId>
+      <artifactId>maven-surefire-plugin</artifactId>
+      <version>${surefire-plugin.version}</version>
+      <configuration>
+        <systemPropertyVariables>
+          <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
+          <maven.home>${maven.home}</maven.home>
+        </systemPropertyVariables>
+      </configuration>
+    </plugin>
+    <plugin>
+      <groupId>org.apache.maven.plugins</groupId>
+      <artifactId>maven-failsafe-plugin</artifactId>
+      <version>${surefire-plugin.version}</version>
+      <executions>
+        <execution>
+          <goals>
+            <goal>integration-test</goal>
+            <goal>verify</goal>
+          </goals>
+          <configuration>
+            <systemPropertyVariables>
+              <native.image.path>${project.build.directory}/${project.build.finalName}-runner</native.image.path>
+              <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
+              <maven.home>${maven.home}</maven.home>
+            </systemPropertyVariables>
+          </configuration>
+        </execution>
+      </executions>
+    </plugin>
+  </plugins>
+</build>
+
+<profiles>
+  <profile>
+    <id>native</id>
+    <properties>
+      <quarkus.native.enabled>true</quarkus.native.enabled>
+      <skipITs>false</skipITs>
+    </properties>
+  </profile>
+</profiles>
+```
+
+## Multi-module projects
+
+In a multi-module Maven project, Quarkus only indexes CDI beans in modules that are explicitly configured. For sub-modules that are not the main application module, add the Jandex plugin so Quarkus can discover their beans:
+
+```xml
+<plugin>
+  <groupId>io.smallrye</groupId>
+  <artifactId>jandex-maven-plugin</artifactId>
+  <version>${jandex.version}</version>
+  <executions>
+    <execution>
+      <id>make-index</id>
+      <goals>
+        <goal>jandex</goal>
+      </goals>
+    </execution>
+  </executions>
+</plugin>
+```
+
+The main application module (the one with `quarkus-maven-plugin`) is indexed automatically. Only add the Jandex plugin to library or shared modules.
+
+<Tip>
+For more on CDI bean discovery across modules, see the Quarkus CDI reference guide.
+</Tip>

@@ -1,0 +1,261 @@
+---
+title: "How Quarkus Extensions Work"
+description: "Learn the Quarkus extension model: BuildStep augmentation, the deployment vs runtime module split, BuildItem producers, and how to record runtime behavior."
+keywords: ["quarkus", "extensions", "build-time", "augmentation", "BuildStep", "BuildItem", "deployment", "runtime"]
+---
+
+A Quarkus extension is an adapter layer between a library or framework and the Quarkus runtime. Its primary job is to move as much work as possible out of application startup and into the build phase — a concept the Quarkus team calls _build-time augmentation_. This guide explains the architecture behind extensions and when you should write one.
+
+## Extension philosophy
+
+### Push work to build time
+
+Traditional Java frameworks bootstrap at runtime: they scan classpaths, read annotations, resolve dependency injection bindings, and configure subsystems every time the application starts. In a cloud or Kubernetes environment, this costs time and memory on every pod restart.
+
+Quarkus inverts this model. An extension performs the same analysis once during the build, records the results as bytecode, and that bytecode is what actually runs at startup. The consequence is a dramatically faster, leaner application:
+
+- Startup-time class scanning is eliminated.
+- Framework metadata classes do not need to be loaded at runtime.
+- GraalVM's native-image compiler can reason more effectively about a "closed world" — code that is never referenced at build time can be eliminated entirely.
+
+<Note>
+The extension framework provides significant resource savings even in JVM mode, not just for native executables.
+</Note>
+
+### Closed-world optimization
+
+Because Quarkus processes your whole application and all its extensions together at build time, it can make globally-informed decisions. For example:
+
+- If no `@Entity` class is found, there is no need to start Hibernate ORM.
+- If only one JDBC driver is present, there is no need for driver-discovery reflection.
+- Substrate VM substitutions (code patches for GraalVM compatibility) can be included only when the relevant library is actually on the classpath.
+
+This is what Quarkus means by "closed world": every component is known at build time, so nothing needs to be kept "just in case."
+
+### Extension vs. library
+
+You do not need an extension just to ship a library. Add an extension when you want to:
+
+- Move heavy initialization work (classpath scanning, annotation processing, ORM bootstrapping) to build time.
+- Expose CDI beans that must be registered at build time.
+- Contribute GraalVM reflection, serialization, or resource metadata.
+- Enforce opinionated defaults based on what the application actually uses.
+- Participate in the build step pipeline to interact with other extensions.
+
+A plain library that does none of the above does not need an extension wrapper.
+
+---
+
+## The two modules
+
+Every Quarkus extension is a Maven (or Gradle) multi-module project with exactly two submodules.
+
+```
+my-extension/
+├── runtime/          # What users depend on; runs in production
+└── deployment/       # Only used during the build; never in production JARs
+```
+
+### Runtime module
+
+The runtime module contains the public API and runtime behavior that the extension exposes to application developers — for example, a client class, a CDI producer, or a JAX-RS filter. This is the artifact users list in their `pom.xml` or `build.gradle`.
+
+```xml
+<dependency>
+  <groupId>org.acme</groupId>
+  <artifactId>my-extension</artifactId>
+  <version>1.0.0</version>
+</dependency>
+```
+
+### Deployment module
+
+The deployment module contains build-time logic: build steps, build item producers, bytecode recorders, and configuration processors. It is resolved automatically by Quarkus during augmentation, starting from the runtime artifact — users should never add the deployment module as a direct dependency.
+
+<Warning>
+The runtime module must never depend on the deployment module. Doing so would pull all build-time classes into production scope, defeating the purpose of the split.
+</Warning>
+
+By convention:
+
+- The runtime artifact has no suffix: `my-extension`.
+- The deployment artifact has the `-deployment` suffix: `my-extension-deployment`.
+
+---
+
+## BuildStep methods
+
+Build steps are the unit of work in the augmentation phase. A build step is any non-static method annotated with `@BuildStep` on a class in the deployment module.
+
+```java
+import io.quarkus.deployment.annotations.BuildStep;
+import io.quarkus.deployment.builditem.FeatureBuildItem;
+
+class MyExtensionProcessor {
+
+    @BuildStep
+    FeatureBuildItem feature() {
+        return new FeatureBuildItem("my-extension");
+    }
+}
+```
+
+Build steps run concurrently. Quarkus resolves their execution order automatically based on what each step produces and consumes — you declare dependencies through the type system, not explicit ordering.
+
+<Note>
+A build step only runs if the build items it produces are (transitively) needed by another build step. Always make sure your steps produce something meaningful.
+</Note>
+
+---
+
+## BuildItem types
+
+Build items are the currency of the augmentation pipeline. They are typed value objects passed between build steps, and must be immutable.
+
+### SimpleBuildItem
+
+Extends `io.quarkus.builder.item.SimpleBuildItem`. Only one instance may exist for a given type in any build. Use this when exactly one provider and any number of consumers make sense — for example, a `BeanContainerBuildItem` that represents the single CDI container.
+
+```java
+public final class ApplicationIndexBuildItem extends SimpleBuildItem {
+
+    private final Index index;
+
+    public ApplicationIndexBuildItem(Index index) {
+        this.index = index;
+    }
+
+    public Index getIndex() {
+        return index;
+    }
+}
+```
+
+### MultiBuildItem
+
+Extends `io.quarkus.builder.item.MultiBuildItem`. Any number of instances of the same type may be produced by any number of steps. Use this when multiple providers contribute to a collection — for example, `ServletBuildItem`, where many servlets may be registered.
+
+```java
+public final class ServletBuildItem extends MultiBuildItem {
+
+    private final String name;
+    private final String servletClass;
+
+    // constructor, getters...
+}
+```
+
+A step that consumes a `MultiBuildItem` type receives a `List<ThatItem>` and is guaranteed to run after all possible producers have completed.
+
+---
+
+## Bytecode recording with `@Record`
+
+Some runtime behavior can only be configured once all build-time metadata is collected. The `@Record` annotation on a `@BuildStep` method lets you record method calls against a _recorder_ class. Those calls are replayed as generated bytecode at the appropriate application lifecycle phase.
+
+There are two execution times:
+
+<AccordionGroup>
+  <Accordion title="STATIC_INIT — recorded bytecode runs in the static initializer">
+    Executed before `main()`. In native mode, this phase runs inside the native build JVM and the resulting object graph is serialized directly into the executable image — meaning this initialization does not run again when the native binary starts. Avoid opening ports or starting threads here.
+
+    ```java
+    @BuildStep
+    @Record(ExecutionTime.STATIC_INIT)
+    void configureAtStaticInit(MyRecorder recorder, BeanContainerBuildItem container) {
+        recorder.initialize(container.getValue(), "some-config-value");
+    }
+    ```
+  </Accordion>
+  <Accordion title="RUNTIME_INIT — recorded bytecode runs in main()">
+    Executed on every application start, including native. Use this phase for anything that must happen at runtime — opening server ports, establishing network connections, and so on.
+
+    ```java
+    @BuildStep
+    @Record(ExecutionTime.RUNTIME_INIT)
+    void startServer(MyRecorder recorder, MyRuntimeConfig config) {
+        recorder.startListening(config.port);
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+The more work you push into `STATIC_INIT`, the faster your application starts and the easier it is for GraalVM to eliminate dead code.
+
+---
+
+## Exposing components via CDI
+
+Quarkus uses CDI as its central component model. Extensions should expose their capabilities as injectable beans.
+
+### Registering a bean class
+
+Produce an `AdditionalBeanBuildItem` to instruct the CDI container to treat a class as a bean definition, just as if it were annotated in user code:
+
+```java
+@BuildStep
+AdditionalBeanBuildItem registerBeans() {
+    return AdditionalBeanBuildItem.unremovableOf(MyService.class);
+}
+```
+
+### Default beans and overriding
+
+Mark a produced bean with `@DefaultBean` to allow application code (or another extension) to override it without requiring CDI alternatives:
+
+```java
+@Dependent
+public class TracerConfiguration {
+
+    @Produces
+    @DefaultBean
+    public Reporter reporter() {
+        return new DefaultReporter();
+    }
+}
+```
+
+Application code that provides its own `Reporter` bean will take precedence automatically. If `@DefaultBean` is not used, users can still override with CDI `@Alternative` + `@Priority`.
+
+### Synthetic beans
+
+For full control over a bean's instantiation — particularly when its attributes or instance must be determined from build-time metadata — use `SyntheticBeanBuildItem`:
+
+```java
+@BuildStep
+@Record(ExecutionTime.STATIC_INIT)
+SyntheticBeanBuildItem syntheticBean(MyRecorder recorder) {
+    return SyntheticBeanBuildItem
+        .configure(MyService.class)
+        .scope(Singleton.class)
+        .runtimeValue(recorder.createService("config-value"))
+        .done();
+}
+```
+
+Synthetic beans bypass the CDI lifecycle — the extension is responsible for providing all dependencies.
+
+---
+
+## Configuration
+
+Expose extension configuration through SmallRye Config by annotating a class with `@ConfigRoot`. Prefer `quarkus.[extension-name].` as the configuration prefix and unify properties in `application.properties` rather than using library-specific files.
+
+Properties fall into two categories:
+
+- **Build-time fixed** (`ConfigPhase.BUILD_TIME`): values are read during augmentation and baked into the build output. Changing them requires a rebuild. Examples: enabling or disabling features, setting JDBC driver class names.
+- **Runtime overridable** (`ConfigPhase.RUN_TIME`): values are read each time the application starts. Examples: host, port, passwords.
+
+```java
+@ConfigRoot(phase = ConfigPhase.BUILD_TIME)
+public interface MyExtensionBuildConfig {
+
+    /** Whether the greeting feature is enabled. */
+    @WithDefault("true")
+    boolean enabled();
+}
+```
+
+<Tip>
+Favor `BUILD_TIME` config for anything that enables or disables features. This allows Quarkus — and GraalVM — to eliminate code paths for disabled features at compile time.
+</Tip>

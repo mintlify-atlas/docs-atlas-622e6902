@@ -1,0 +1,404 @@
+---
+title: "Building REST Endpoints with RESTEasy Reactive"
+description: "Define @Path resources, handle GET/POST/PUT/DELETE, serialize JSON with Jackson or JSON-B, map exceptions, and expose OpenAPI docs in Quarkus REST."
+---
+
+Quarkus REST (formerly RESTEasy Reactive) is a Jakarta REST implementation built from the ground up on Vert.x. It moves much of the request handling work to build time, delivering high performance for both blocking and non-blocking endpoints while remaining fully compatible with Jakarta REST APIs. This guide covers how to define resources, handle parameters, serialize JSON, map exceptions, and expose your API via OpenAPI.
+
+## Adding the extension
+
+<Tabs>
+  <Tab title="Maven">
+    Add the dependency to your `pom.xml`. Choose the JSON variant if you need JSON serialization:
+
+    <CodeGroup>
+
+    ```xml pom.xml (base)
+    <dependency>
+        <groupId>io.quarkus</groupId>
+        <artifactId>quarkus-rest</artifactId>
+    </dependency>
+    ```
+
+    ```xml pom.xml (Jackson)
+    <dependency>
+        <groupId>io.quarkus</groupId>
+        <artifactId>quarkus-rest-jackson</artifactId>
+    </dependency>
+    ```
+
+    ```xml pom.xml (JSON-B)
+    <dependency>
+        <groupId>io.quarkus</groupId>
+        <artifactId>quarkus-rest-jsonb</artifactId>
+    </dependency>
+    ```
+
+    </CodeGroup>
+  </Tab>
+  <Tab title="Gradle">
+    <CodeGroup>
+
+    ```gradle build.gradle (base)
+    implementation("io.quarkus:quarkus-rest")
+    ```
+
+    ```gradle build.gradle (Jackson)
+    implementation("io.quarkus:quarkus-rest-jackson")
+    ```
+
+    ```gradle build.gradle (JSON-B)
+    implementation("io.quarkus:quarkus-rest-jsonb")
+    ```
+
+    </CodeGroup>
+  </Tab>
+</Tabs>
+
+## Defining a resource
+
+Any class annotated with `@Path` can expose methods as REST endpoints. The `@Path` on the class defines the URI prefix; `@Path` on a method appends to it.
+
+```java src/main/java/org/acme/rest/GreetingResource.java
+package org.acme.rest;
+
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.core.MediaType;
+
+@Path("/greeting")
+public class GreetingResource {
+
+    @GET
+    @Produces(MediaType.TEXT_PLAIN)
+    public String hello() {
+        return "Hello, World!";
+    }
+}
+```
+
+To nest paths, add `@Path` on the method:
+
+```java
+@Path("rest")
+public class Endpoint {
+
+    @Path("hello")
+    @GET
+    public String hello() {
+        return "Hello, World!";
+    }
+}
+```
+
+This exposes the endpoint at `/rest/hello`.
+
+## HTTP method annotations
+
+Each endpoint method must be annotated with one HTTP method annotation:
+
+| Annotation | Semantics |
+|---|---|
+| `@GET` | Read a resource; must not modify state |
+| `@POST` | Create a resource |
+| `@PUT` | Replace or create a resource; idempotent |
+| `@DELETE` | Delete a resource; idempotent |
+| `@PATCH` | Partial update; not idempotent |
+| `@HEAD` | Metadata only, no response body |
+| `@OPTIONS` | Describe communication options |
+
+## Path and query parameters
+
+Use URI templates to capture path segments, and annotations to bind request parameters to method arguments:
+
+```java src/main/java/org/acme/rest/Endpoint.java
+package org.acme.rest;
+
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.Path;
+
+import org.jboss.resteasy.reactive.RestPath;
+import org.jboss.resteasy.reactive.RestQuery;
+
+@Path("hello")
+public class Endpoint {
+
+    @Path("{name}/{age:\\d+}")
+    @GET
+    public String personalisedHello(String name, int age) {
+        return "Hello " + name + ", is your age really " + age + "?";
+    }
+}
+```
+
+The `@RestPath` annotation is optional when the parameter name matches a URI template variable. Additional parameter annotations:
+
+| Annotation | Source |
+|---|---|
+| `@RestPath` | URI path segment |
+| `@RestQuery` | Query string parameter |
+| `@RestHeader` | HTTP request header |
+| `@RestCookie` | HTTP cookie |
+| `@RestForm` | URL-encoded or multipart form field |
+
+A method handling multiple parameter types looks like this:
+
+```java
+@Path("/cheeses/{type}")
+public class Endpoint {
+
+    @POST
+    public String allParams(@RestPath String type,
+                            @RestQuery String age,
+                            @RestCookie String level,
+                            @RestHeader("X-Cheese-Secret-Handshake")
+                            String secretHandshake,
+                            @RestForm String smell) {
+        return type + "/" + age + "/" + level + "/" + secretHandshake + "/" + smell;
+    }
+}
+```
+
+## JSON serialization
+
+When you add `quarkus-rest-jackson` or `quarkus-rest-jsonb`, any method parameter or return type not covered by a built-in reader/writer is automatically serialized to and from JSON.
+
+```java src/main/java/org/acme/rest/FruitResource.java
+package org.acme.rest;
+
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.POST;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.core.MediaType;
+import java.util.List;
+import java.util.ArrayList;
+
+public class Fruit {
+    public String name;
+    public String description;
+
+    public Fruit() {}
+
+    public Fruit(String name, String description) {
+        this.name = name;
+        this.description = description;
+    }
+}
+
+@Path("/fruits")
+@Produces(MediaType.APPLICATION_JSON)
+@Consumes(MediaType.APPLICATION_JSON)
+public class FruitResource {
+
+    private List<Fruit> fruits = new ArrayList<>(List.of(
+        new Fruit("Apple", "Winter fruit"),
+        new Fruit("Pineapple", "Tropical fruit")
+    ));
+
+    @GET
+    public List<Fruit> list() {
+        return fruits;
+    }
+
+    @POST
+    public List<Fruit> add(Fruit fruit) {
+        fruits.add(fruit);
+        return fruits;
+    }
+}
+```
+
+<Note>
+`String` return types default to `text/plain`. Use `@Produces(MediaType.APPLICATION_JSON)` at the class or method level to explicitly select JSON output.
+</Note>
+
+## Request body
+
+Any method parameter with no annotation receives the deserialized request body. The framework supports `String`, `byte[]`, `InputStream`, all Java primitives, and — with a JSON extension — any other type mapped from JSON.
+
+```java
+@POST
+@Path("/fruits")
+public Fruit create(Fruit fruit) {
+    // fruit is deserialized from the JSON request body
+    return fruit;
+}
+```
+
+## Exception mapping
+
+For HTTP error responses, throw `WebApplicationException` or one of its subtypes:
+
+```java
+import jakarta.ws.rs.BadRequestException;
+import jakarta.ws.rs.NotFoundException;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.Path;
+
+@Path("cheeses/{cheese}")
+public class Endpoint {
+
+    @GET
+    public String findCheese(String cheese) {
+        if (cheese == null)
+            throw new BadRequestException();        // 400
+        if (!cheese.equals("camembert"))
+            throw new NotFoundException("Unknown cheese: " + cheese);  // 404
+        return "Camembert is a very nice cheese";
+    }
+}
+```
+
+For service-layer exceptions that don't extend `WebApplicationException`, use `@ServerExceptionMapper` to convert them to HTTP responses:
+
+```java
+import org.jboss.resteasy.reactive.RestResponse;
+import org.jboss.resteasy.reactive.server.ServerExceptionMapper;
+import jakarta.ws.rs.core.Response;
+
+@Path("cheeses/{cheese}")
+public class Endpoint {
+
+    @Inject
+    CheeseService cheeses;
+
+    @ServerExceptionMapper
+    public RestResponse<String> mapException(UnknownCheeseException x) {
+        return RestResponse.status(Response.Status.NOT_FOUND, "Unknown cheese: " + x.name);
+    }
+
+    @GET
+    public String findCheese(String cheese) {
+        return cheeses.findCheese(cheese);
+    }
+}
+```
+
+<Note>
+Exception mappers defined inside a resource class only handle exceptions thrown in that class. Place mappers in a separate class to make them global:
+
+```java
+import org.jboss.resteasy.reactive.server.ServerExceptionMapper;
+import org.jboss.resteasy.reactive.RestResponse;
+import jakarta.ws.rs.core.Response;
+
+class ExceptionMappers {
+    @ServerExceptionMapper
+    public RestResponse<String> mapException(UnknownCheeseException x) {
+        return RestResponse.status(Response.Status.NOT_FOUND, "Unknown cheese: " + x.name);
+    }
+}
+```
+</Note>
+
+## Response objects
+
+Return `Response` or `RestResponse` to control status codes, headers, and body explicitly:
+
+```java
+import jakarta.ws.rs.core.Response;
+
+@POST
+@Path("/fruits")
+public Response create(Fruit fruit) {
+    fruits.add(fruit);
+    return Response.status(Response.Status.CREATED)
+                   .entity(fruit)
+                   .build();
+}
+```
+
+## Content negotiation
+
+Use `@Produces` and `@Consumes` to declare the media types your endpoint accepts and returns. Method-level annotations override class-level ones:
+
+```java
+@Path("/data")
+@Produces(MediaType.APPLICATION_JSON)
+public class DataResource {
+
+    @GET
+    public MyData getData() { ... }
+
+    @GET
+    @Path("/raw")
+    @Produces(MediaType.TEXT_PLAIN)
+    public String getRaw() { ... }
+}
+```
+
+## Setting the application root path
+
+Use `@ApplicationPath` to set a common prefix for all REST endpoints:
+
+```java
+import jakarta.ws.rs.ApplicationPath;
+import jakarta.ws.rs.core.Application;
+
+@ApplicationPath("/api")
+public class MyApplication extends Application {}
+```
+
+All endpoints are now relative to `/api`. Alternatively, set the build-time property `quarkus.rest.path` in `application.properties`.
+
+<AccordionGroup>
+  <Accordion title="Multipart form uploads">
+    Handle `multipart/form-data` with `@RestForm` and `FileUpload`:
+
+    ```java
+    import org.jboss.resteasy.reactive.RestForm;
+    import org.jboss.resteasy.reactive.multipart.FileUpload;
+    import jakarta.ws.rs.POST;
+    import jakarta.ws.rs.Path;
+
+    @Path("multipart")
+    public class MultipartResource {
+
+        @POST
+        public void upload(@RestForm String description,
+                           @RestForm("image") FileUpload file) {
+            // move file to permanent storage before the request ends
+        }
+    }
+    ```
+
+    Move uploaded files to permanent storage in your handler. Uploaded files are deleted when the HTTP response is sent if `quarkus.http.body.delete-uploaded-files-on-end=true`.
+  </Accordion>
+
+  <Accordion title="Jackson secure serialization">
+    Restrict which fields are included in JSON output based on user roles using `@SecureField`:
+
+    ```java
+    import io.quarkus.resteasy.reactive.jackson.SecureField;
+
+    public class Person {
+
+        @SecureField(rolesAllowed = "admin")
+        private final Long id;
+        private final String first;
+        private final String last;
+
+        // getters...
+    }
+    ```
+
+    Fields annotated with `@SecureField` are omitted from the JSON output unless the authenticated user has the required role. This only applies when the produced content type is `application/json`.
+  </Accordion>
+
+  <Accordion title="Logging exception details">
+    Quarkus REST does not log exceptions by default (for security reasons). To enable debug logging for parameter handling errors:
+
+    ```properties
+    quarkus.log.category."org.jboss.resteasy.reactive.server.handlers.ParameterHandler".level=DEBUG
+    ```
+
+    To log all exceptions before exception mappers run:
+
+    ```properties
+    quarkus.log.category."org.jboss.resteasy.reactive.common.core.AbstractResteasyReactiveContext".level=DEBUG
+    ```
+  </Accordion>
+</AccordionGroup>

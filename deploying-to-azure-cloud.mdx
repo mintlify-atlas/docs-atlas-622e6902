@@ -1,0 +1,247 @@
+---
+title: "Running Quarkus on Microsoft Azure"
+description: "Deploy Quarkus applications to Azure Container Apps, Azure Functions, or Azure App Service, with native image support and Azure service integrations."
+keywords: ["quarkus", "azure", "azure container apps", "azure functions", "app service", "native", "deployment"]
+---
+
+Azure offers several hosting options for Quarkus applications. The right choice depends on your workload: **Azure Container Apps** suits long-running microservices, **Azure Functions** works well for event-driven and HTTP-triggered workloads, and **Azure App Service** fits traditional web applications that need built-in autoscaling and monitoring.
+
+## Prerequisites
+
+- [Azure CLI](https://docs.microsoft.com/cli/azure/install-azure-cli) installed and authenticated
+- An Azure subscription (a [free account](https://azure.microsoft.com/free/) works)
+- Docker installed for building container images
+
+Authenticate the CLI before running any Azure commands:
+
+```bash
+az login
+```
+
+## Deployment options
+
+<AccordionGroup>
+  <Accordion title="Azure Container Apps (recommended)">
+    Azure Container Apps is the recommended hosting option for containerized Quarkus services. It provides managed Kubernetes infrastructure, built-in autoscaling (including scale-to-zero), and HTTPS ingress without requiring you to manage clusters directly.
+  </Accordion>
+  <Accordion title="Azure Functions">
+    Use Azure Functions when you want serverless, event-driven execution. Quarkus supports Functions through the `quarkus-azure-functions-http` extension, which wraps your existing HTTP endpoints so they run as Azure Functions without rewriting your application logic.
+  </Accordion>
+  <Accordion title="Azure App Service">
+    Azure App Service is a good fit when you need autoscaling, deployment slots, and built-in monitoring for a web application. It supports running Quarkus as a Linux container.
+  </Accordion>
+</AccordionGroup>
+
+## Azure Container Apps
+
+### 1. Build a native container image
+
+Quarkus native images start in milliseconds, which pairs well with Container Apps' scale-to-zero capability. Update your Dockerfile to listen on port 80 (the default for most Azure services):
+
+```dockerfile src/main/docker/Dockerfile.native
+# ... existing build stages ...
+EXPOSE 80
+CMD ["./application", "-Dquarkus.http.host=0.0.0.0", "-Dquarkus.http.port=80"]
+```
+
+Build the image:
+
+```bash
+docker build -f src/main/docker/Dockerfile.native \
+  -t quarkus-quickstart/my-app .
+```
+
+### 2. Create an Azure Container Registry
+
+Store your image in a private Azure Container Registry (ACR) rather than a public registry:
+
+```bash
+# Create a resource group
+az group create --name my-resource-group --location eastus
+
+# Create the registry
+az acr create \
+  --resource-group my-resource-group \
+  --name myregistry \
+  --sku Basic \
+  --admin-enabled true
+
+# Authenticate Docker with the registry
+az acr login --name myregistry
+```
+
+### 3. Push the image
+
+```bash
+# Get the registry login server
+ACR_SERVER=$(az acr show -n myregistry --query loginServer -o tsv)
+
+# Tag and push
+docker tag quarkus-quickstart/my-app $ACR_SERVER/quarkus-quickstart/my-app
+docker push $ACR_SERVER/quarkus-quickstart/my-app
+```
+
+Verify the push succeeded:
+
+```bash
+az acr repository list -n myregistry
+```
+
+### 4. Deploy to Azure Container Apps
+
+```bash
+# Create a Container Apps environment
+az containerapp env create \
+  --name my-env \
+  --resource-group my-resource-group \
+  --location eastus
+
+# Deploy the container
+az containerapp create \
+  --name my-quarkus-app \
+  --resource-group my-resource-group \
+  --environment my-env \
+  --image $ACR_SERVER/quarkus-quickstart/my-app \
+  --registry-server $ACR_SERVER \
+  --target-port 80 \
+  --ingress external \
+  --min-replicas 0 \
+  --max-replicas 10
+```
+
+`--ingress external` exposes an HTTPS endpoint. `--min-replicas 0` enables scale-to-zero.
+
+## Azure Functions
+
+The `quarkus-azure-functions-http` extension exposes your existing Quarkus REST endpoints as an Azure Functions HTTP trigger. You do not need to rewrite your application logic.
+
+### Add the extension
+
+<Tabs>
+  <Tab title="Maven">
+    ```xml pom.xml
+    <dependency>
+        <groupId>io.quarkus</groupId>
+        <artifactId>quarkus-azure-functions-http</artifactId>
+    </dependency>
+    ```
+  </Tab>
+  <Tab title="Quarkus CLI">
+    ```bash
+    quarkus extension add azure-functions-http
+    ```
+  </Tab>
+</Tabs>
+
+### Configure the function
+
+```properties application.properties
+quarkus.azure-functions.app-name=my-quarkus-fn
+quarkus.azure-functions.resource-group=my-resource-group
+quarkus.azure-functions.region=eastus
+```
+
+### Build and deploy
+
+```bash
+./mvnw clean package azure-functions:deploy
+```
+
+The plugin packages your application, creates the Function App if it does not exist, and deploys the artifact.
+
+<Note>
+Azure Functions run on a managed JVM. For lower cold start times, use the `quarkus-azure-functions` extension with a native build rather than the JVM version.
+</Note>
+
+## Azure App Service
+
+Azure App Service for Linux Containers runs your Quarkus native container image with built-in load balancing, SSL termination, and deployment slots.
+
+Push your image to ACR as described above, then follow [Microsoft's tutorial for deploying from a private registry](https://docs.microsoft.com/azure/app-service/containers/tutorial-custom-docker-image) to create the App Service plan and web app.
+
+Alternatively, deploy directly to **Azure Container Instances** for a quick single-container deployment (no autoscaling):
+
+```bash
+ACR_CREDS=$(az acr credential show --name myregistry)
+ACR_USERNAME=$(echo $ACR_CREDS | jq -r '.username')
+ACR_PASSWORD=$(echo $ACR_CREDS | jq -r '.passwords[0].value')
+
+az container create \
+  --name quarkus-hello \
+  --resource-group my-resource-group \
+  --image $ACR_SERVER/quarkus-quickstart/my-app \
+  --registry-login-server $ACR_SERVER \
+  --registry-username $ACR_USERNAME \
+  --registry-password $ACR_PASSWORD \
+  --dns-name-label quarkus-hello-demo \
+  --ports 80 \
+  --query ipAddress.fqdn
+```
+
+<Warning>
+Azure Container Instances does not autoscale. It is suitable for testing and simple workloads, not production services that need high availability.
+</Warning>
+
+## Azure service integrations
+
+The [Quarkiverse Azure Services extensions](https://github.com/quarkiverse/quarkus-azure-services) provide Quarkus-native integrations with Azure platform services:
+
+| Service | Extension artifact |
+|---|---|
+| Azure Service Bus | `quarkus-azure-servicebus` |
+| Azure Blob Storage | `quarkus-azure-storage-blob` |
+| Azure Key Vault | `quarkus-azure-keyvault` |
+| Azure Event Hubs | `quarkus-azure-eventhubs` |
+| Azure Cosmos DB | `quarkus-azure-cosmos` |
+
+### Example: Azure Blob Storage
+
+```xml pom.xml
+<dependency>
+    <groupId>io.quarkiverse.azureservices</groupId>
+    <artifactId>quarkus-azure-storage-blob</artifactId>
+</dependency>
+```
+
+```properties application.properties
+quarkus.azure.storage.blob.connection-string=${AZURE_STORAGE_CONNECTION_STRING}
+```
+
+```java
+@Inject
+BlobServiceClient blobServiceClient;
+
+public void upload(String containerName, String blobName, byte[] data) {
+    blobServiceClient
+        .getBlobContainerClient(containerName)
+        .getBlobClient(blobName)
+        .upload(BinaryData.fromBytes(data));
+}
+```
+
+### Example: Azure Key Vault secrets
+
+```properties application.properties
+quarkus.azure.keyvault.secret.endpoint=https://my-vault.vault.azure.net/
+```
+
+Use managed identity or a service principal for authentication in production rather than connection strings or passwords.
+
+## Production configuration
+
+```properties application.properties
+# Use the production profile for Azure deployments
+%prod.quarkus.log.level=WARN
+%prod.quarkus.log.console.format=%d{HH:mm:ss} %-5p [%c] %s%e%n
+
+# Enable HTTP access log for App Service diagnostics
+quarkus.http.access-log.enabled=true
+
+# Container port (80 for most Azure services)
+quarkus.http.port=80
+quarkus.http.host=0.0.0.0
+```
+
+<Tip>
+Prefer managed identities over connection strings for authenticating to Azure services. Managed identities eliminate the need to rotate secrets and work seamlessly with Azure Key Vault, Storage, and Service Bus.
+</Tip>

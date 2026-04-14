@@ -1,0 +1,288 @@
+---
+title: "Build a Reactive Quarkus Application"
+description: "Use Hibernate Reactive with Panache and Quarkus REST to build a non-blocking CRUD API backed by PostgreSQL, returning Uni and Multi Mutiny types."
+---
+
+Reactive is a set of principles for building robust, efficient, and concurrent applications. In a reactive system, I/O operations do not block the thread that issued them. Instead, the thread is released while the I/O is in flight, and a continuation runs when the result arrives. This means a small pool of I/O threads can handle a much larger number of concurrent requests than a thread-per-request model allows, using fewer resources in the process.
+
+Quarkus has been reactive since its inception. Its HTTP layer, database clients, and messaging integrations are all built on non-blocking I/O provided by Eclipse Vert.x. This guide gets you started with reactive programming in Quarkus by building a simple CRUD application for a `Fruit` entity.
+
+## Imperative vs. reactive: a question of threads
+
+In the traditional imperative model, a framework assigns one worker thread per request. That thread is blocked whenever it waits on a database query, an HTTP call, or any other I/O. Handling many concurrent requests requires many threads, and each thread has memory and CPU cost.
+
+In the reactive model, a small number of I/O threads handle all incoming requests. When a request needs to perform I/O, it schedules the operation and attaches a continuation — code to run when the I/O completes. The I/O thread is freed immediately and can pick up another request. When the scheduled I/O finishes, the thread picks up the continuation and continues processing.
+
+Quarkus uses [Mutiny](https://smallrye.io/smallrye-mutiny/) as its reactive programming library. Mutiny provides two core types:
+
+- `Uni<T>` — represents a computation that will eventually produce a single item (or a failure). Like a future or a promise.
+- `Multi<T>` — represents a stream of zero or more items over time.
+
+## Prerequisites
+
+- JDK 17 or later
+- Apache Maven 3.9.9+ or Gradle 8.x
+- Docker or Podman (for the Dev Services PostgreSQL container)
+
+## Bootstrap the reactive application
+
+<Steps>
+  <Step title="Create the project">
+    Go to [code.quarkus.io](https://code.quarkus.io) and select the following extensions:
+
+    1. **Quarkus REST Jackson** — reactive JAX-RS with JSON serialization
+    2. **Hibernate Reactive with Panache** — reactive ORM with the active record pattern
+    3. **Reactive PostgreSQL client** — non-blocking PostgreSQL driver
+
+    Click **Generate your application**, download the zip, unzip it, and open it in your IDE.
+
+    Alternatively, create the project from the CLI:
+
+    <CodeGroup>
+
+    ```bash Quarkus CLI
+    quarkus create app org.acme:hibernate-reactive-panache \
+        --extension='rest-jackson,hibernate-reactive-panache,reactive-pg-client'
+    cd hibernate-reactive-panache
+    ```
+
+    ```bash Maven
+    mvn io.quarkus.platform:quarkus-maven-plugin:3.17.5:create \
+        -DprojectGroupId=org.acme \
+        -DprojectArtifactId=hibernate-reactive-panache \
+        -Dextensions='rest-jackson,hibernate-reactive-panache,reactive-pg-client'
+    cd hibernate-reactive-panache
+    ```
+
+    </CodeGroup>
+  </Step>
+
+  <Step title="Configure the datasource">
+    Open `src/main/resources/application.properties` and add:
+
+    ```properties src/main/resources/application.properties
+    quarkus.datasource.db-kind=postgresql
+    quarkus.hibernate-orm.schema-management.strategy=drop-and-create
+    ```
+
+    This tells Quarkus to use PostgreSQL and to re-create the schema on each start. In Dev Mode, Quarkus will automatically start a PostgreSQL container for you via Dev Services — no manual database setup required.
+  </Step>
+
+  <Step title="Add seed data">
+    Create `src/main/resources/import.sql` to pre-populate the database:
+
+    ```sql src/main/resources/import.sql
+    INSERT INTO fruit(id, name) VALUES (1, 'Cherry');
+    INSERT INTO fruit(id, name) VALUES (2, 'Apple');
+    INSERT INTO fruit(id, name) VALUES (3, 'Banana');
+    ALTER SEQUENCE fruit_seq RESTART WITH 4;
+    ```
+
+    Quarkus runs this file after creating the schema in dev and test modes.
+  </Step>
+</Steps>
+
+## The reactive Panache entity
+
+Create `src/main/java/org/acme/hibernate/orm/panache/Fruit.java`:
+
+```java src/main/java/org/acme/hibernate/orm/panache/Fruit.java
+package org.acme.hibernate.orm.panache;
+
+import jakarta.persistence.Cacheable;
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+
+import io.quarkus.hibernate.reactive.panache.PanacheEntity;
+
+@Entity
+@Cacheable
+public class Fruit extends PanacheEntity {
+
+    @Column(length = 40, unique = true)
+    public String name;
+
+}
+```
+
+<Warning>
+  Import `io.quarkus.hibernate.reactive.panache.PanacheEntity` — the reactive variant. The blocking variant (`io.quarkus.hibernate.orm.panache.PanacheEntity`) will not work with a reactive datasource and will cause runtime errors.
+</Warning>
+
+`PanacheEntity` provides the `id` field and a full suite of reactive data access methods such as `findById`, `listAll`, `persist`, and `delete`. Because `Fruit` extends the reactive `PanacheEntity`, all database calls return `Uni` or `Multi` types and execute on I/O threads without blocking.
+
+## The reactive REST resource
+
+Because database interactions are non-blocking and asynchronous, the HTTP resource must return Mutiny types so Quarkus can handle the async results correctly.
+
+Create `src/main/java/org/acme/hibernate/orm/panache/FruitResource.java`:
+
+```java src/main/java/org/acme/hibernate/orm/panache/FruitResource.java
+package org.acme.hibernate.orm.panache;
+
+import java.util.List;
+
+import io.quarkus.panache.common.Sort;
+import io.smallrye.mutiny.Uni;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.ws.rs.Path;
+
+@Path("/fruits")
+@ApplicationScoped
+public class FruitResource {
+
+}
+```
+
+Now add methods one at a time to understand what each reactive type represents.
+
+### List all fruits
+
+```java
+@GET
+public Uni<List<Fruit>> get() {
+    return Fruit.listAll(Sort.by("name"));
+}
+```
+
+`Fruit.listAll()` returns a `Uni<List<Fruit>>`. Quarkus REST knows how to serialize a `Uni` result — it subscribes to it and writes the JSON response when the item arrives. You do not need to block or unwrap the result manually.
+
+<Note>
+  You may wonder why this returns `Uni<List<Fruit>>` rather than streaming rows directly. Relational database protocols are not designed for streaming. Keeping a connection open until a slow consumer finishes reading rows exhausts the connection pool. When the result set is bounded, load it into a list. For large result sets, implement pagination instead.
+</Note>
+
+### Get a single fruit
+
+```java
+@GET
+@Path("/{id}")
+public Uni<Fruit> getSingle(Long id) {
+    return Fruit.findById(id);
+}
+```
+
+`Fruit.findById(id)` returns a `Uni<Fruit>` that completes when the database returns the row.
+
+### Create a fruit
+
+```java
+@POST
+public Uni<RestResponse<Fruit>> create(Fruit fruit) {
+    return Panache.withTransaction(fruit::persist)
+                 .replaceWith(RestResponse.status(CREATED, fruit));
+}
+```
+
+Writing to the database requires a transaction. `Panache.withTransaction` obtains one asynchronously, runs `fruit.persist()` inside it, and commits on success. The `.replaceWith(...)` call is a continuation — once the persist completes, return a `201 Created` HTTP response.
+
+Test the create endpoint:
+
+```bash
+curl --header "Content-Type: application/json" \
+     --request POST \
+     --data '{"name":"peach"}' \
+     http://localhost:8080/fruits
+```
+
+## Running in Dev Mode
+
+Start the application:
+
+<CodeGroup>
+
+```bash Quarkus CLI
+quarkus dev
+```
+
+```bash Maven
+./mvnw quarkus:dev
+```
+
+</CodeGroup>
+
+Quarkus automatically starts a PostgreSQL container using Dev Services. Open `http://localhost:8080/fruits` to see the seed data:
+
+```json
+[{"id":2,"name":"Apple"},{"id":3,"name":"Banana"},{"id":1,"name":"Cherry"}]
+```
+
+## Testing and packaging
+
+Testing a reactive application uses the same approach as a non-reactive one — send HTTP requests and assert responses. The `@QuarkusTest` annotation starts the full application (including Dev Services) before the test suite runs, so your tests exercise real database operations.
+
+Package the application the same way as any Quarkus app:
+
+<CodeGroup>
+
+```bash Maven (JVM)
+./mvnw package
+```
+
+```bash Maven (native)
+./mvnw package -Dnative
+```
+
+```bash Gradle (JVM)
+./gradlew build
+```
+
+</CodeGroup>
+
+## Running in production
+
+In production you supply your own database. Pass the connection details as system properties or environment variables:
+
+<Tabs>
+  <Tab title="JVM jar">
+    Start a PostgreSQL instance:
+
+    ```bash
+    docker run -it --rm=true \
+        --name postgres-quarkus \
+        -e POSTGRES_USER=quarkus \
+        -e POSTGRES_PASSWORD=quarkus \
+        -e POSTGRES_DB=fruits \
+        -p 5432:5432 \
+        postgres:14
+    ```
+
+    Then run the application:
+
+    ```bash
+    java \
+       -Dquarkus.datasource.reactive.url=postgresql://localhost/fruits \
+       -Dquarkus.datasource.username=quarkus \
+       -Dquarkus.datasource.password=quarkus \
+       -jar target/quarkus-app/quarkus-run.jar
+    ```
+  </Tab>
+  <Tab title="Native executable">
+    ```bash
+    ./target/hibernate-reactive-panache-runner \
+      -Dquarkus.datasource.reactive.url=postgresql://localhost/fruits \
+      -Dquarkus.datasource.username=quarkus \
+      -Dquarkus.datasource.password=quarkus
+    ```
+  </Tab>
+</Tabs>
+
+<Tip>
+  Configuration can also come from environment variables or `.env` files.   See the [configuration guide](/config) for the full list of configuration sources.
+</Tip>
+
+## Going further
+
+<CardGroup cols={2}>
+  <Card title="Reactive messaging" icon="bolt" href="/messaging">
+    Connect to Kafka, Pulsar, RabbitMQ, and more with SmallRye Reactive Messaging.
+  </Card>
+  <Card title="Hibernate Reactive" icon="database" href="/hibernate-reactive">
+    Full reference for the reactive Panache API including repositories, queries, and transactions.
+  </Card>
+  <Card title="Dev Services" icon="server" href="/getting-started-dev-services">
+    Understand how Quarkus provisions databases and other services automatically in dev and test modes.
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/config">
+    Learn about configuration profiles, sources, and the full list of options.
+  </Card>
+</CardGroup>

@@ -1,0 +1,347 @@
+---
+title: "Adding Codestarts to Quarkus Extensions"
+description: "Create codestarts to generate starter code when developers add your extension via the Quarkus CLI, code.quarkus.io, or IDE wizards."
+keywords: ["quarkus", "codestart", "extension", "scaffolding", "templates", "qute", "code generation", "CLI"]
+---
+
+When a developer creates a new Quarkus project and selects your extension — whether through `code.quarkus.io`, the Quarkus CLI, or an IDE wizard — a codestart can automatically inject working starter code into their project. This gives users a running example of your extension without any copy-pasting or documentation hunting.
+
+This guide explains how to write, structure, and test a codestart for your extension.
+
+---
+
+## What is a codestart?
+
+A codestart is a template directory bundled with your extension that generates code when the extension is added to a new Quarkus project. It is not boilerplate — it should contain the simplest possible working example of your extension's most common use case.
+
+Codestarts are applied automatically by Quarkus tooling:
+
+- [code.quarkus.io](https://code.quarkus.io) — extensions tagged with `[code]` generate starter files.
+- The Quarkus CLI: `quarkus create app -x my-extension`
+- The Quarkus Maven plugin: `mvn quarkus:create`
+
+Each codestart contributes files that are merged with files from other codestarts selected for the same project. Build tool files, Dockerfiles, and language boilerplate come from Quarkus's built-in _base codestarts_. Your extension codestart only needs to provide code specific to your extension.
+
+---
+
+## Scaffold an extension with a codestart
+
+When creating a new extension, pass the `--codestart` flag to include the codestart skeleton:
+
+<Tabs>
+  <Tab title="Quarkus CLI">
+    ```bash
+    quarkus create extension --codestart org.acme:greeting-extension
+    ```
+  </Tab>
+  <Tab title="Maven">
+    ```bash
+    mvn io.quarkus.platform:quarkus-maven-plugin:3.x.x:create-extension -N \
+        -DgroupId=org.acme \
+        -DextensionId=greeting-extension \
+        -DwithCodestart
+    ```
+  </Tab>
+</Tabs>
+
+The generator adds the `extension-codestart` skeleton, which includes the directory structure, a `codestart.yml` file, and a sample Java class.
+
+---
+
+## Codestart directory structure
+
+For a standalone or Quarkiverse extension, place the codestart inside the **runtime** module:
+
+```
+runtime/src/main/codestarts/quarkus/
+└── aloha-codestart/
+    ├── codestart.yml              # Required: codestart metadata
+    ├── base/                      # Files added regardless of language
+    │   ├── README.tpl.qute.md
+    │   └── src/main/resources/
+    │       └── application.yml
+    └── java/                      # Files added only for Java projects
+        └── src/main/java/
+            └── org/acme/
+                └── AlohaResource.java
+```
+
+<Note>
+`codestart.yml` is the only required file. Everything else is optional template content.
+</Note>
+
+Directory conventions:
+
+| Directory | When its contents are applied |
+|---|---|
+| `base/` | Always — for all languages and build tools |
+| `java/` | Only when the user selects Java |
+| `kotlin/` | Only when the user selects Kotlin |
+| `scala/` | Only when the user selects Scala |
+
+Language-specific directories override files from `base/` when there is a name conflict.
+
+---
+
+## codestart.yml
+
+Every codestart requires a `codestart.yml` at the root of the codestart directory:
+
+```yaml
+# Unique name for this codestart
+name: aloha-codestart
+# Reference: use your extension's short ID
+ref: aloha
+# Always 'code' for extension codestarts
+type: code
+# Always 'extension-codestart' for extension codestarts
+tags: extension-codestart
+# Public metadata — accessible as template variables
+metadata:
+  title: Aloha
+  description: Start to code with the Aloha extension.
+  related-guide-section: https://docs.quarkiverse.io/quarkus-aloha/dev/
+  # Optional: for extensions that serve web resources
+  path: /aloha
+```
+
+The `metadata` block is accessible inside Qute templates as named variables — for example, `{title}` resolves to `"Aloha"`.
+
+---
+
+## Template files with Qute
+
+Static files are copied as-is. Files with `.tpl.qute` in their name are processed by [Qute](https://quarkus.io/guides/qute), Quarkus's template engine, before being written to the generated project. The `.tpl.qute` segment is removed from the output file name.
+
+For example, `MyResource.tpl.qute.java` becomes `MyResource.java` in the generated project.
+
+### Static config keys available in templates
+
+```
+project.group-id
+project.artifact-id
+project.version
+project.name
+project.package-name
+quarkus.platform.group-id
+quarkus.platform.version
+quarkus.version
+java.version
+kotlin.version
+```
+
+### Dynamic config keys
+
+```
+gen-info.time
+input.selected-extensions[].name
+input.selected-extensions[].guide
+input.selected-extensions-ga
+input.provided-code[].name
+input.provided-code[].title
+```
+
+### Example: a Qute-templated Java class
+
+```java
+// org/acme/AlohaResource.tpl.qute.java
+package {project.package-name};
+
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.core.MediaType;
+
+@Path("{metadata.path}")
+public class AlohaResource {
+
+    @GET
+    @Produces(MediaType.TEXT_PLAIN)
+    public String hello() {
+        return "Aloha!";
+    }
+}
+```
+
+<Warning>
+Always use `org.acme` as the package name in your codestart sources. Quarkus automatically replaces `org.acme` with the user's chosen package name in all `.java`, `.kt`, and `.scala` files. For other file types, use the `{project.package-name}` Qute variable.
+</Warning>
+
+---
+
+## Supporting multiple languages
+
+It is recommended to provide at least Java and Kotlin. Each language gets its own directory alongside `base/`:
+
+```
+aloha-codestart/
+├── codestart.yml
+├── base/
+│   └── src/main/resources/application.yml
+├── java/
+│   └── src/main/java/org/acme/AlohaResource.java
+└── kotlin/
+    └── src/main/kotlin/org/acme/AlohaResource.kt
+```
+
+Declare the supported languages in `quarkus-extension.yaml`:
+
+```yaml
+metadata:
+  codestart:
+    name: "aloha"
+    languages:
+      - "java"
+      - "kotlin"
+    artifact: "io.quarkiverse.aloha:quarkus-aloha:codestarts:jar:${project.version}"
+```
+
+<Tip>
+Start with Java only and add Kotlin in a follow-up. Create a tracking issue so it does not get forgotten.
+</Tip>
+
+---
+
+## Application config
+
+Provide any configuration your example requires as a YAML file at `base/src/main/resources/application.yml`. Quarkus merges configs from all selected codestarts and converts the result to the format chosen by the user (YAML or properties):
+
+```yaml
+# base/src/main/resources/application.yml
+quarkus:
+  greeting:
+    message: "Aloha!"
+```
+
+---
+
+## Binding the codestart to the extension
+
+Add the `maven-jar-plugin` configuration to `runtime/pom.xml` to package the codestart as a classifier JAR:
+
+```xml
+<plugin>
+  <artifactId>maven-jar-plugin</artifactId>
+  <executions>
+    <execution>
+      <id>generate-codestart-jar</id>
+      <phase>generate-resources</phase>
+      <goals>
+        <goal>jar</goal>
+      </goals>
+      <configuration>
+        <classesDirectory>${project.basedir}/src/main</classesDirectory>
+        <includes>
+          <include>codestarts/**</include>
+        </includes>
+        <classifier>codestarts</classifier>
+        <skipIfEmpty>true</skipIfEmpty>
+      </configuration>
+    </execution>
+  </executions>
+</plugin>
+```
+
+Then reference the codestart artifact in `runtime/src/main/resources/META-INF/quarkus-extension.yaml`:
+
+```yaml
+name: Aloha
+description: A friendly greeting extension.
+metadata:
+  codestart:
+    name: "aloha"
+    languages:
+      - "java"
+    artifact: "io.quarkiverse.aloha:quarkus-aloha:codestarts:jar:${project.version}"
+```
+
+Without this binding, the codestart files will exist in your build output but will never be applied.
+
+---
+
+## Testing codestarts
+
+Add the `quarkus-devtools-testing` dependency to your `integration-tests` module:
+
+```xml
+<dependency>
+  <groupId>io.quarkus</groupId>
+  <artifactId>quarkus-devtools-testing</artifactId>
+  <scope>test</scope>
+</dependency>
+```
+
+Write a test class using `QuarkusCodestartTest`:
+
+```java
+public class AlohaCodestartTest {
+
+    @RegisterExtension
+    public static QuarkusCodestartTest codestartTest = QuarkusCodestartTest.builder()
+        .languages(Language.JAVA)
+        .setupStandaloneExtensionTest("io.quarkiverse.aloha:quarkus-aloha")
+        .build();
+
+    @Test
+    void testContent() throws Throwable {
+        codestartTest.checkGeneratedSource("org.acme.AlohaResource");
+    }
+
+    @Test
+    void buildAllProjects() throws Throwable {
+        codestartTest.buildAllProjects();
+    }
+}
+```
+
+`QuarkusCodestartTest` generates projects in `target/quarkus-codestart-test/` before running tests. The `real-data` subdirectory contains actual generated projects you can open in your IDE or build from the terminal — this is the fastest way to iterate on your codestart during development.
+
+### Snapshot testing
+
+Snapshot tests verify that generated output does not change unexpectedly between commits. Generated files are compared against committed snapshots:
+
+```java
+@Test
+void testContent() throws Throwable {
+    // Validates generated source against stored snapshot
+    codestartTest.checkGeneratedSource("org.acme.AlohaResource");
+
+    // Validates a non-source file
+    codestartTest.assertThatGeneratedFileMatchSnapshot(
+        Language.JAVA,
+        "src/main/resources/application.yml"
+    );
+}
+```
+
+To generate or update snapshots locally, run tests with `-Dsnap`:
+
+```bash
+mvn test -Dsnap
+```
+
+Commit the updated snapshots alongside your template changes. Without them, CI will fail.
+
+---
+
+## README template
+
+Add a README snippet for your codestart at `base/README.tpl.qute.md`. Quarkus appends it to the project's `README.md`:
+
+```markdown
+{#include readme-header /}
+
+For more information on the Aloha extension, see the [documentation](https://docs.quarkiverse.io/quarkus-aloha/dev/).
+```
+
+The `{#include readme-header /}` directive renders standard information from `codestart.yml` — title, description, and the related guide link.
+
+---
+
+## Writing tips
+
+- Codestarts from different extensions must be able to coexist without interfering. Use unique class names and unique REST paths (e.g. `/aloha`).
+- Do not include business logic. The codestart should be a minimal "hello world" that shows how the extension is used.
+- Always use `org.acme` as the package name; Quarkus handles the substitution.
+- Write config in `application.yml`; it will be merged with other codestarts and converted to the user's chosen format.
+- Keep codestarts independent of build tool and Docker configuration — those come from the base codestarts.

@@ -1,0 +1,113 @@
+---
+title: "Observability in Quarkus: Metrics, Traces, Logs"
+description: "Overview of Quarkus observability extensions for metrics (Micrometer), distributed tracing (OpenTelemetry), structured logging, and health checks."
+keywords: ["observability", "opentelemetry", "micrometer", "logging", "health", "tracing", "metrics", "OTLP", "Grafana", "LGTM"]
+---
+
+Observability is the capability to ask and answer questions about a running system. Quarkus provides a rich set of extensions covering all major telemetry signals, so you can understand what your application is doing—whether that means spotting a slow database query, tracking error rates across services, or confirming that a pod is ready to accept traffic.
+
+## The three pillars
+
+Quarkus observability is organized around three core signals.
+
+**Metrics** give you quantitative measurements over time: request counts, latency histograms, JVM heap usage, and any custom gauge or counter you define. Quarkus has supported Micrometer-based metrics for a long time, and almost all built-in instrumentation uses the Micrometer API.
+
+**Distributed tracing** links requests as they flow through multiple services. OpenTelemetry traces show you exactly where time is spent—across HTTP hops, database calls, and message-broker interactions—without any manual instrumentation for common frameworks.
+
+**Structured logging** captures discrete events with severity levels. Quarkus uses JBoss Log Manager as its logging backend and supports SLF4J, Log4j 2, and other facades via adapters. Logs can be forwarded to a centralized system using the OpenTelemetry log exporter or the JSON logging extension.
+
+<Note>
+OpenTelemetry also defines a fourth signal—events—but the Events API is still under development upstream. For profiling, Quarkus provides the `quarkus-jfr` extension based on Java Flight Recorder.
+</Note>
+
+## Recommended extensions
+
+| Signal | Recommended extension |
+|---|---|
+| Tracing | `quarkus-opentelemetry` |
+| Metrics (Micrometer + OTLP export) | `quarkus-micrometer-registry-prometheus` or `quarkus-micrometer-opentelemetry` |
+| Logs | `quarkus-opentelemetry` (opt-in) or `quarkus-logging-json` |
+| Health checks | `quarkus-smallrye-health` |
+
+The `quarkus-opentelemetry` extension covers tracing out of the box. Metrics and logs via OpenTelemetry are available in the same extension but disabled by default (tech preview). Enable them explicitly:
+
+```properties
+# Enable OTel metrics (tech preview)
+quarkus.otel.metrics.enabled=true
+
+# Enable OTel logs (tech preview)
+quarkus.otel.logs.enabled=true
+```
+
+For production setups that need both Micrometer metrics and OpenTelemetry traces and logs, use `quarkus-micrometer-opentelemetry`. It enables all three signals by default with a single unified OTLP output.
+
+## OTLP as the unified output protocol
+
+The [OpenTelemetry Protocol (OTLP)](https://opentelemetry.io/docs/specs/otel/protocol/) is the recommended way to send telemetry out of a Quarkus application. It gives you a single exporter endpoint regardless of whether you are sending traces, metrics, or logs, and it is supported by every major observability backend.
+
+Configure the OTLP endpoint in `application.properties`:
+
+```properties
+quarkus.otel.exporter.otlp.endpoint=http://localhost:4317
+```
+
+You can override the endpoint per signal if your backend requires separate ingest URLs:
+
+```properties
+quarkus.otel.exporter.otlp.traces.endpoint=http://tempo:4317
+quarkus.otel.exporter.otlp.metrics.endpoint=http://prometheus-otel:4317
+quarkus.otel.exporter.otlp.logs.endpoint=http://loki:4317
+```
+
+## Dev Services for observability (LGTM stack)
+
+In development mode, Quarkus can start a pre-configured [Grafana LGTM](https://github.com/grafana/docker-otel-lgtm) container that bundles:
+
+- **Grafana** — dashboards and visualization
+- **Loki** — log aggregation
+- **Grafana Tempo** — distributed traces
+- **Prometheus** (via the OpenTelemetry Collector) — metrics storage
+
+No manual backend setup is needed. Start your application with `quarkus dev` and navigate to `http://localhost:3000` to open Grafana.
+
+<Tip>
+The LGTM Dev Service is provided by the `quarkus-observability-devservices-lgtm` extension. Add it to your project to get the full observability stack locally with zero configuration.
+</Tip>
+
+Add the dependency:
+
+<Tabs>
+  <Tab title="Maven">
+    ```xml
+    <dependency>
+        <groupId>io.quarkus</groupId>
+        <artifactId>quarkus-observability-devservices-lgtm</artifactId>
+    </dependency>
+    ```
+  </Tab>
+  <Tab title="Gradle">
+    ```groovy
+    implementation("io.quarkus:quarkus-observability-devservices-lgtm")
+    ```
+  </Tab>
+</Tabs>
+
+The Dev Service automatically configures the OTLP exporter to point at the managed container. In production, override these properties to target your real backends:
+
+```properties
+quarkus.otel.exporter.otlp.endpoint=https://otel-collector.example.com:4317
+```
+
+## Explore the details
+
+<CardGroup cols={3}>
+  <Card title="OpenTelemetry" icon="activity" href="/opentelemetry">
+    Instrument traces and metrics with OpenTelemetry. Configure samplers, exporters, custom spans, and resource attributes.
+  </Card>
+  <Card title="Logging" icon="file-text" href="/logging">
+    Configure log levels, structured JSON output, file handlers, and MDC for contextual log enrichment.
+  </Card>
+  <Card title="Health Checks" icon="heart-pulse" href="/smallrye-health">
+    Expose liveness, readiness, and startup endpoints for Kubernetes probes and load-balancer integration.
+  </Card>
+</CardGroup>

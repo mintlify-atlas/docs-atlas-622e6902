@@ -1,0 +1,352 @@
+---
+title: "Application and Bean Lifecycle in Quarkus"
+description: "Handle startup and shutdown with StartupEvent, ShutdownEvent, @Startup, @Shutdown, graceful shutdown timeout, and QuarkusMain for custom entry points."
+---
+
+Quarkus provides several mechanisms to run logic when your application starts up or shuts down. You can observe CDI events fired by the framework, annotate beans or methods with `@Startup` and `@Shutdown`, or define a custom main class with `@QuarkusMain`. This guide explains each approach and covers graceful shutdown configuration.
+
+## Listening for startup and shutdown events
+
+The simplest way to react to application startup and shutdown is to observe `StartupEvent` and `ShutdownEvent` in any CDI bean:
+
+```java src/main/java/org/acme/lifecycle/AppLifecycleBean.java
+package org.acme.lifecycle;
+
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Observes;
+
+import io.quarkus.runtime.ShutdownEvent;
+import io.quarkus.runtime.StartupEvent;
+import org.jboss.logging.Logger;
+
+@ApplicationScoped
+public class AppLifecycleBean {
+
+    private static final Logger LOGGER = Logger.getLogger("ListenerBean");
+
+    void onStart(@Observes StartupEvent ev) {
+        LOGGER.info("The application is starting...");
+    }
+
+    void onStop(@Observes ShutdownEvent ev) {
+        LOGGER.info("The application is stopping...");
+    }
+}
+```
+
+The `onStart` method is called after the application is fully initialized and ready to serve requests. The `onStop` method is called when the application is shutting down, before resources are released.
+
+<Tip>
+These events fire in dev mode between redeployments, so your startup and shutdown logic runs each time you save a file and trigger a hot reload.
+</Tip>
+
+<Note>
+Observer methods can inject other beans via method parameters or field injection. The bean's full CDI context is available at the time the event is fired.
+</Note>
+
+## @Startup: eager bean initialization
+
+By default, `@ApplicationScoped` beans are initialized lazily — the first method call triggers creation. Annotate a bean with `@Startup` to force creation at application startup:
+
+```java src/main/java/org/acme/lifecycle/EagerAppBean.java
+package org.acme.lifecycle;
+
+import io.quarkus.runtime.Startup;
+import jakarta.enterprise.context.ApplicationScoped;
+
+@Startup
+@ApplicationScoped
+public class EagerAppBean {
+
+    private final String name;
+
+    EagerAppBean(NameGenerator generator) {
+        this.name = generator.createName();
+    }
+}
+```
+
+Under the hood, Quarkus generates a synthetic `StartupEvent` observer for each `@Startup` bean. The bean constructor runs when the application starts and the instance is stored in the application context.
+
+<Tip>
+If a class is annotated with `@Startup` but has no scope annotation, `@ApplicationScoped` is added automatically.
+</Tip>
+
+You can also place `@Startup` on an individual method to run initialization logic without making the whole bean eager:
+
+```java
+@ApplicationScoped
+public class EagerAppBean {
+
+    @Startup
+    void init() {
+        doSomeCoolInit();
+    }
+
+    @Startup
+    Uni<Void> initReactive() {
+        return doSomeCoolReactiveInit();
+    }
+}
+```
+
+The method form creates the bean instance and calls the annotated method on startup. Methods returning `Uni<Void>` run on a non-blocking thread and require the Quarkus Vert.x extension.
+
+## @Shutdown: cleanup on termination
+
+Use `@Shutdown` to mark a bean method that should run during application shutdown. It is equivalent to observing `ShutdownEvent` and provides a more concise alternative:
+
+```java
+import io.quarkus.runtime.Shutdown;
+import io.quarkus.runtime.ShutdownEvent;
+import jakarta.enterprise.context.ApplicationScoped;
+
+// These two beans behave identically:
+
+@ApplicationScoped
+class Bean1 {
+    void onShutdown(@Observes ShutdownEvent event) {
+        // cleanup logic
+    }
+}
+
+@ApplicationScoped
+class Bean2 {
+
+    @Shutdown
+    void shutdown() {
+        // cleanup logic
+    }
+}
+```
+
+The `@Shutdown` method must be non-private, non-static, and declare no arguments.
+
+## Graceful shutdown
+
+By default, Quarkus shuts down immediately when a termination signal is received. Configure `quarkus.shutdown.timeout` to wait for in-flight HTTP requests to complete before shutting down:
+
+```properties
+# Wait up to 30 seconds for active requests to complete
+quarkus.shutdown.timeout=30S
+```
+
+When a timeout is set, Quarkus will not shut down until all active requests have finished or the timeout elapses. Currently, only the HTTP extension participates in graceful shutdown — messaging-based requests may be interrupted.
+
+### Shutdown delay
+
+Enable a pre-shutdown delay to allow load balancers to stop routing traffic before the application stops accepting requests:
+
+```properties
+# Enable shutdown delay support (build-time property)
+quarkus.shutdown.delay-enabled=true
+```
+
+Then set the delay duration at runtime:
+
+```properties
+# Delay actual shutdown by 10 seconds after readiness probe starts failing
+quarkus.shutdown.delay=10S
+```
+
+During the delay, the application still handles requests, but its readiness probe returns a failure so the infrastructure can drain connections.
+
+### Reacting to shutdown delay with @ShutdownDelayInitiated
+
+Use `@ShutdownDelayInitiated` to run logic when the shutdown delay begins — for example, to stop accepting new work:
+
+```java
+import io.quarkus.runtime.ShutdownDelayInitiated;
+import io.quarkus.runtime.ShutdownDelayInitiatedEvent;
+import jakarta.enterprise.context.ApplicationScoped;
+
+// These two beans behave identically:
+
+@ApplicationScoped
+class ObservingBean1 {
+    void onPreShutdown(@Observes ShutdownDelayInitiatedEvent event) {
+        // signal other components to stop accepting work
+    }
+}
+
+@ApplicationScoped
+class ObservingBean2 {
+
+    @ShutdownDelayInitiated
+    void preShutdown() {
+        // signal other components to stop accepting work
+    }
+}
+```
+
+<Warning>
+Methods annotated with `@ShutdownDelayInitiated` are always executed and may block the shutdown procedure. Keep them fast or use async patterns.
+</Warning>
+
+## Custom main class
+
+Quarkus generates a default `main` method automatically. Define your own with `@QuarkusMain` to launch from an IDE without Maven or Gradle:
+
+```java src/main/java/com/acme/Main.java
+package com.acme;
+
+import io.quarkus.runtime.annotations.QuarkusMain;
+import io.quarkus.runtime.Quarkus;
+
+@QuarkusMain
+public class Main {
+
+    public static void main(String... args) {
+        Quarkus.run(args);
+    }
+}
+```
+
+<Warning>
+Do not put business logic directly in the `main` method. Quarkus has not fully started yet at that point, and the application may be running in a different ClassLoader.
+</Warning>
+
+For command-mode applications that run a task and then exit, implement `QuarkusApplication` and call `Quarkus.waitForExit()` if you want the process to stay running until a signal is received:
+
+```java
+package com.acme;
+
+import io.quarkus.runtime.Quarkus;
+import io.quarkus.runtime.QuarkusApplication;
+import io.quarkus.runtime.annotations.QuarkusMain;
+
+@QuarkusMain
+public class Main {
+    public static void main(String... args) {
+        Quarkus.run(MyApp.class, args);
+    }
+
+    public static class MyApp implements QuarkusApplication {
+
+        @Override
+        public int run(String... args) throws Exception {
+            System.out.println("Do startup logic here");
+            Quarkus.waitForExit();
+            return 0;
+        }
+    }
+}
+```
+
+When `run()` returns, the Quarkus process exits.
+
+## Launch modes
+
+Quarkus exposes three launch modes:
+
+| Mode | When active |
+|---|---|
+| `DEVELOPMENT` | Running `quarkus:dev` |
+| `TEST` | Running JUnit tests |
+| `NORMAL` | Production — all other cases |
+
+Inject the current mode in any CDI bean:
+
+```java
+import io.quarkus.runtime.LaunchMode;
+import jakarta.inject.Inject;
+import jakarta.enterprise.context.ApplicationScoped;
+
+@ApplicationScoped
+public class ModeAwareBean {
+
+    @Inject
+    LaunchMode launchMode;
+
+    void doSomething() {
+        if (launchMode == LaunchMode.DEVELOPMENT) {
+            // dev-only logic
+        }
+    }
+}
+```
+
+Or read it statically anywhere:
+
+```java
+LaunchMode mode = LaunchMode.current();
+```
+
+## Scheduling periodic tasks
+
+The `@Scheduled` annotation (from `io.quarkus.scheduler.Scheduled`, provided by the `quarkus-scheduler` extension) runs CDI bean methods on a fixed schedule without blocking the application lifecycle.
+
+Add the extension:
+
+```bash
+quarkus extension add scheduler
+```
+
+Annotate any method on a CDI bean with `@Scheduled`:
+
+```java src/main/java/org/acme/CounterBean.java
+package org.acme;
+
+import java.util.concurrent.atomic.AtomicInteger;
+import jakarta.enterprise.context.ApplicationScoped;
+import io.quarkus.scheduler.Scheduled;
+import io.quarkus.scheduler.ScheduledExecution;
+
+@ApplicationScoped
+public class CounterBean {
+
+    private AtomicInteger counter = new AtomicInteger();
+
+    public int get() {
+        return counter.get();
+    }
+
+    // Runs every 10 seconds
+    @Scheduled(every = "10s")
+    void increment() {
+        counter.incrementAndGet();
+    }
+
+    // Runs at 10:15am every day using cron syntax
+    @Scheduled(cron = "0 15 10 * * ?")
+    void cronJob(ScheduledExecution execution) {
+        counter.incrementAndGet();
+        System.out.println(execution.getScheduledFireTime());
+    }
+
+    // Cron expression from application.properties
+    @Scheduled(cron = "{cron.expr}")
+    void cronJobWithExpressionInConfig() {
+        counter.incrementAndGet();
+    }
+}
+```
+
+Set the configurable cron expression in `application.properties`:
+
+```properties src/main/resources/application.properties
+cron.expr=0/5 * * * * ?
+```
+
+Key `@Scheduled` attributes:
+
+| Attribute | Description | Example |
+|---|---|---|
+| `every` | Fixed interval using ISO-8601 duration or Quarkus shorthand | `"10s"`, `"PT1H"` |
+| `cron` | Cron expression (six fields: seconds minutes hours day-of-month month day-of-week) | `"0 15 10 * * ?"` |
+| `delay` | Initial delay before the first execution | `5` (with `delayUnit`) |
+| `identity` | Unique name for the scheduled job, used to programmatically manage it | `"my-job"` |
+| `concurrentExecution` | Whether to allow concurrent executions: `PROCEED` (default) or `SKIP` | |
+
+<Tip>
+  For clustered applications where only one node should execute the scheduled job, use the `quarkus-quartz` extension instead of `quarkus-scheduler`.
+</Tip>
+
+## StartupEvent vs @Initialized(ApplicationScoped.class)
+
+Both `StartupEvent` and `@Initialized(ApplicationScoped.class)` fire when the application starts, but their timing differs:
+
+- In JVM mode, `@Initialized(ApplicationScoped.class)` fires first, then `StartupEvent`.
+- In native image builds, `@Initialized(ApplicationScoped.class)` fires **during the build process**, while `StartupEvent` fires when the native executable runs.
+
+Use `StartupEvent` (or `@Startup`) for logic that must run when the application instance starts, not during native compilation.

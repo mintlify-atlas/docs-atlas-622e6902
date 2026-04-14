@@ -1,0 +1,172 @@
+---
+title: "Quarkus CLI and Developer Tooling Overview"
+description: "Overview of Quarkus developer tools: the Quarkus CLI, Maven plugin, Gradle plugin, IDE integrations, and the Dev UI for local development."
+keywords: ["quarkus", "cli", "tooling", "maven", "gradle", "ide", "dev ui"]
+---
+
+Quarkus ships a complete developer toolchain covering every stage of development — from scaffolding a new project and managing extensions, to live reloading code changes, building native executables, and deploying to Kubernetes. Whether you prefer the command line, Maven, Gradle, or your IDE, Quarkus meets you where you are.
+
+<CardGroup cols={2}>
+  <Card title="Quarkus CLI" icon="terminal" href="#quarkus-cli">
+    Install via SDKMAN, Homebrew, or JBang. The fastest way to create apps, manage extensions, and run dev mode.
+  </Card>
+  <Card title="Maven Plugin" icon="cube" href="/maven-tooling">
+    Use `quarkus:dev`, `quarkus:build`, and more to drive the full Quarkus lifecycle from Maven.
+  </Card>
+  <Card title="Gradle Plugin" icon="cube" href="/gradle-tooling">
+    Apply `id("io.quarkus")` and use tasks like `quarkusDev` and `quarkusBuild` from Gradle.
+  </Card>
+  <Card title="Dev UI" icon="layout-dashboard" href="/dev-ui">
+    A browser-based developer console available at `localhost:8080/q/dev-ui` during dev mode.
+  </Card>
+</CardGroup>
+
+## Quarkus CLI
+
+The Quarkus CLI is the recommended way to interact with Quarkus projects. It wraps the Maven and Gradle plugins behind a consistent interface, and provides the fastest path from zero to a running application.
+
+### Installation
+
+<Tabs>
+  <Tab title="SDKMAN">
+    ```bash
+    sdk install quarkus
+    ```
+  </Tab>
+  <Tab title="Homebrew">
+    ```bash
+    brew install quarkusio/tap/quarkus
+    ```
+  </Tab>
+  <Tab title="JBang">
+    ```bash
+    jbang trust add https://repo1.maven.org/maven2/io/quarkus/quarkus-cli/
+    jbang app install --fresh --force quarkus@quarkusio
+    ```
+  </Tab>
+</Tabs>
+
+Verify the installation:
+
+```bash
+quarkus --version
+```
+
+### Creating a project
+
+The `quarkus create app` command scaffolds a new Quarkus project. At its simplest:
+
+```bash
+quarkus create app my-groupId:my-artifactId
+```
+
+The command generates a Maven project by default. Use `--gradle` or `--gradle-kotlin-dsl` to switch build tools. Common options:
+
+| Flag | Description |
+|------|-------------|
+| `--extension`, `-x` | Comma-separated list of extensions to include (e.g. `rest,hibernate-orm`) |
+| `--kotlin` | Use Kotlin as the project language |
+| `--gradle` | Generate a Gradle (Groovy DSL) project |
+| `--gradle-kotlin-dsl` | Generate a Gradle Kotlin DSL project |
+| `--no-code` | Skip generating example source files |
+| `--java` | Specify the Java version (defaults to 17) |
+
+Example with extensions and Kotlin:
+
+```bash
+quarkus create app org.acme:my-app \
+  --extension=rest,hibernate-orm,jdbc-postgresql \
+  --kotlin \
+  --gradle-kotlin-dsl
+```
+
+For the full list of options:
+
+```bash
+quarkus create app --help
+```
+
+### Running dev mode
+
+```bash
+quarkus dev
+```
+
+Dev mode starts your application with hot reload enabled. Saving a Java or resource file triggers background recompilation and redeployment — no restart required. Press `d` in the terminal to open the [Dev UI](/dev-ui) in your browser.
+
+### Building
+
+```bash
+# JVM build (fast-jar by default)
+quarkus build
+
+# Native executable
+quarkus build --native
+```
+
+### Managing extensions
+
+```bash
+# List available extensions
+quarkus extension list
+
+# Search for a specific extension
+quarkus extension list --search=hibernate
+
+# Add an extension
+quarkus extension add hibernate-orm jdbc-postgresql
+
+# Remove an extension
+quarkus extension remove hibernate-orm
+```
+
+Extension names are resolved loosely — `hibernate`, `Hibernate`, and `io.quarkus:quarkus-hibernate-orm` all refer to the same artifact.
+
+---
+
+## IDE support
+
+All major Java IDEs support Quarkus projects natively through standard Maven or Gradle project import. Additional Quarkus-specific tooling is available for a richer experience.
+
+### IntelliJ IDEA
+
+IntelliJ IDEA Ultimate ships with a Quarkus plugin that provides:
+
+- Project creation wizard integrated into **New Project**
+- Run configurations for `quarkus:dev`
+- Endpoint detection and navigation
+- `application.properties` code completion with Quarkus-specific keys
+
+To import an existing project: **File → New → Project From Existing Sources**, select the project root, then choose **Maven** or **Gradle** as the external model.
+
+### Visual Studio Code
+
+Install the **Quarkus Tools for Visual Studio Code** extension from the marketplace. It provides:
+
+- Project scaffolding via the command palette
+- `application.properties` autocompletion and validation
+- Syntax highlighting for Quarkus-specific annotations
+- Debugging support through the Java Extension Pack
+
+Open the project directory in VS Code. If you have the **Java Extension Pack** installed, Maven and Gradle projects are loaded automatically.
+
+### Eclipse IDE
+
+Use **File → Import → Maven → Existing Maven Project** (or the Gradle equivalent) to import the project. Run dev mode in a separate terminal:
+
+```bash
+./mvnw quarkus:dev
+```
+
+The **Quarkus Tools for Eclipse** plugin adds `application.properties` support and project wizards.
+
+---
+
+## Choosing a build tool
+
+All Quarkus features are available regardless of build tool. The choice usually comes down to team preference:
+
+- **Maven** — the default for new Quarkus projects; well-supported across all IDEs
+- **Gradle** — preferred for polyglot builds, build caching, and Kotlin DSL projects
+
+See the [Maven plugin reference](/maven-tooling) and [Gradle plugin reference](/gradle-tooling) for detailed configuration options.

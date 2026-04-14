@@ -1,0 +1,219 @@
+---
+title: "Deploying Quarkus to OpenShift"
+description: "Deploy Quarkus applications to Red Hat OpenShift using Source-to-Image (S2I) builds, auto-generated Deployment manifests, and the OpenShift extension."
+keywords: ["quarkus", "openshift", "s2i", "source-to-image", "deployment", "route", "native"]
+---
+
+OpenShift is a Kubernetes-based platform with additional developer tooling. The `quarkus-openshift` extension generates OpenShift-specific resources—image streams, build configs, `Deployment` objects, and `Route` definitions—and can perform an end-to-end build and deploy in a single command.
+
+<Note>
+From Quarkus 3.8, `Deployment` is the default resource kind. The older `DeploymentConfig` is deprecated in both OpenShift and Quarkus. If you are migrating existing apps that used `DeploymentConfig`, remove the old object manually after redeploying to avoid running both simultaneously.
+</Note>
+
+## Adding the extension
+
+<Tabs>
+  <Tab title="Maven">
+    ```xml pom.xml
+    <dependency>
+        <groupId>io.quarkus</groupId>
+        <artifactId>quarkus-openshift</artifactId>
+    </dependency>
+    ```
+  </Tab>
+  <Tab title="Gradle">
+    ```groovy build.gradle
+    implementation("io.quarkus:quarkus-openshift")
+    ```
+  </Tab>
+  <Tab title="Quarkus CLI">
+    ```bash
+    quarkus extension add openshift
+    ```
+  </Tab>
+  <Tab title="Maven plugin">
+    ```bash
+    ./mvnw quarkus:add-extension -Dextensions="io.quarkus:quarkus-openshift"
+    ```
+  </Tab>
+</Tabs>
+
+If you also add `quarkus-smallrye-health`, OpenShift will automatically verify startup, liveness, and readiness using the health endpoints.
+
+## Logging in to the cluster
+
+Use the OpenShift CLI before building or deploying:
+
+```bash
+# Interactive login (prompts for server URL and password)
+oc login -u myUsername
+
+# Token-based login
+oc login --token=myToken --server=https://api.my-cluster.example.com
+```
+
+Alternatively, pass credentials directly to the Quarkus build without using `oc`:
+
+```bash
+./mvnw clean package \
+  -Dquarkus.kubernetes-client.api-server-url=https://api.my-cluster.example.com \
+  -Dquarkus.kubernetes-client.token=myToken
+```
+
+Switch to or create the target project:
+
+```bash
+oc project my-project          # switch to existing project
+oc new-project my-project      # create and switch
+```
+
+## Build strategies
+
+The extension supports three strategies. Choose based on your target runtime and cluster setup.
+
+| Strategy | JVM | Native | Notes |
+|---|---|---|---|
+| Docker build | Yes | Yes | Preferred; artifacts built outside the cluster |
+| Binary S2I | Yes | No | JAR used as S2I input; fast builds |
+| Source S2I | Yes | No | Full source build inside the cluster |
+
+The default is **S2I** for backward compatibility. To switch to Docker:
+
+```properties application.properties
+quarkus.openshift.build-strategy=docker
+```
+
+## Source-to-Image (S2I) build
+
+S2I performs the build inside the OpenShift cluster. A binary S2I build uses your locally packaged JAR as input:
+
+<Steps>
+  <Step title="Build the container image">
+    ```bash
+    ./mvnw clean package -Dquarkus.container-image.build=true
+    ```
+    This triggers an S2I binary build. The JAR is uploaded to the cluster, built into an image, and stored in an `ImageStream`.
+  </Step>
+  <Step title="Create the application from the ImageStream">
+    ```bash
+    oc get is
+    oc new-app --name=my-app my-project/my-app:1.0.0-SNAPSHOT
+    ```
+  </Step>
+  <Step title="Expose the service">
+    ```bash
+    oc expose svc/my-app
+    oc get routes
+    curl http://$(oc get route my-app -o jsonpath='{.spec.host}')/hello
+    ```
+  </Step>
+</Steps>
+
+After the first deployment, rebuilding the container image automatically triggers a new rollout—you do not need to repeat the setup steps.
+
+<Note>
+If you encounter `SSLHandshakeException: PKIX path building failed` during the build, add the following to trust the cluster's self-signed certificate:
+
+```properties application.properties
+quarkus.kubernetes-client.trust-certs=true
+```
+</Note>
+
+## Deploy in a single step
+
+Set `quarkus.openshift.deploy=true` to build and deploy in one command:
+
+```bash
+./mvnw clean package -Dquarkus.openshift.deploy=true
+```
+
+You can also set it permanently for CI pipelines:
+
+```properties application.properties
+quarkus.openshift.deploy=true
+```
+
+## Generated resources
+
+The extension generates:
+
+- **ImageStream** — tracks the built container image
+- **BuildConfig** — defines how the image is built (S2I or Docker)
+- **Deployment** — the running application
+- **Service** — internal cluster networking
+
+## Exposing a Route
+
+A `Route` makes the application reachable from outside the cluster. To expose one:
+
+```properties application.properties
+quarkus.openshift.route.expose=true
+```
+
+You can also pass this at build time without editing `application.properties`:
+
+```bash
+./mvnw clean package -Dquarkus.openshift.route.expose=true
+```
+
+### Securing the Route with TLS
+
+OpenShift supports several TLS termination modes. The following example configures passthrough termination:
+
+```properties application.properties
+quarkus.openshift.route.expose=true
+quarkus.openshift.route.tls.termination=passthrough
+quarkus.openshift.route.tls.insecure-edge-termination-policy=None
+```
+
+## Non-S2I builds (Docker / Jib)
+
+You can use Docker or Jib instead of S2I. In this case, an `ImageStream` pointing to the external registry is generated, and the image is pushed there during the build:
+
+```properties application.properties
+# Use Docker
+quarkus.container-image.builder=docker
+
+# Or use Jib
+quarkus.container-image.builder=jib
+```
+
+## Customizing the base image
+
+To override the base image used for JVM or native builds:
+
+```properties application.properties
+quarkus.openshift.base-jvm-image=image-registry.openshift-image-registry.svc:5000/my-project/openjdk-21:latest
+```
+
+## Native builds on OpenShift
+
+To compile to a native executable and deploy:
+
+```bash
+./mvnw clean package -Dnative \
+  -Dquarkus.native.container-build=true \
+  -Dquarkus.openshift.deploy=true
+```
+
+`-Dquarkus.native.container-build=true` runs the native compilation inside a container, which means you do not need GraalVM installed locally—the build runs in a Linux container compatible with the OpenShift cluster.
+
+<Tip>
+The Docker build strategy supports native executables. Binary S2I does not. Set `quarkus.openshift.build-strategy=docker` when deploying native builds.
+</Tip>
+
+## Useful labels and annotations
+
+Use the same label/annotation properties as the Kubernetes extension, substituting `kubernetes` with `openshift`:
+
+```properties application.properties
+quarkus.openshift.part-of=my-platform
+quarkus.openshift.name=my-service
+quarkus.openshift.version=2.1.0
+
+# Custom labels
+quarkus.openshift.labels.team=backend
+
+# Custom annotations
+quarkus.openshift.annotations.jira=PROJ-1234
+```

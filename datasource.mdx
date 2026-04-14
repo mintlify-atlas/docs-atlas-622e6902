@@ -1,0 +1,166 @@
+---
+title: "Connecting to Databases with Quarkus Datasource"
+description: "Configure JDBC and reactive datasources in Quarkus, set up connection pooling with Agroal, and use Dev Services for zero-config local database provisioning."
+---
+
+Quarkus provides a unified configuration model for connecting to relational databases over both JDBC and reactive drivers. Under the hood, JDBC connections are pooled by [Agroal](https://agroal.github.io/) while reactive connections are managed by [Vert.x](https://vertx.io/), giving you high-performance, scalable pooling in either model. The `quarkus-jdbc-*` and `quarkus-reactive-*-client` extensions add build-time optimizations and integrate datasources with Quarkus security, health checks, and metrics out of the box.
+
+## Supported databases
+
+Quarkus ships built-in support for the following databases:
+
+| Database | `db-kind` value | JDBC extension | Reactive extension |
+|---|---|---|---|
+| PostgreSQL | `postgresql` | `quarkus-jdbc-postgresql` | `quarkus-reactive-pg-client` |
+| MySQL | `mysql` | `quarkus-jdbc-mysql` | `quarkus-reactive-mysql-client` |
+| MariaDB | `mariadb` | `quarkus-jdbc-mariadb` | `quarkus-reactive-mysql-client` |
+| H2 (in-memory) | `h2` | `quarkus-jdbc-h2` | — |
+| Microsoft SQL Server | `mssql` | `quarkus-jdbc-mssql` | `quarkus-reactive-mssql-client` |
+| Oracle | `oracle` | `quarkus-jdbc-oracle` | `quarkus-reactive-oracle-client` |
+| DB2 | `db2` | `quarkus-jdbc-db2` | `quarkus-reactive-db2-client` |
+
+For databases without a built-in extension, set `db-kind=other` and specify `quarkus.datasource.jdbc.driver` explicitly. This works in JVM mode but is unlikely to produce a working native executable.
+
+## Adding the extension
+
+<CodeGroup>
+
+```xml pom.xml (JDBC - PostgreSQL)
+<dependency>
+    <groupId>io.quarkus</groupId>
+    <artifactId>quarkus-jdbc-postgresql</artifactId>
+</dependency>
+```
+
+```gradle build.gradle (JDBC - PostgreSQL)
+implementation("io.quarkus:quarkus-jdbc-postgresql")
+```
+
+```xml pom.xml (Reactive - PostgreSQL)
+<dependency>
+    <groupId>io.quarkus</groupId>
+    <artifactId>quarkus-reactive-pg-client</artifactId>
+</dependency>
+```
+
+```gradle build.gradle (Reactive - PostgreSQL)
+implementation("io.quarkus:quarkus-reactive-pg-client")
+```
+
+</CodeGroup>
+
+Adding any built-in JDBC driver extension automatically pulls in `quarkus-agroal`, which provides the connection pool. If you supply a custom driver, add `quarkus-agroal` explicitly.
+
+## Configuring a datasource
+
+<Tabs>
+  <Tab title="JDBC">
+    Configure the datasource kind, credentials, and JDBC URL in `application.properties`:
+
+    ```properties application.properties
+    quarkus.datasource.db-kind=postgresql
+    quarkus.datasource.username=myuser
+    quarkus.datasource.password=secret
+
+    quarkus.datasource.jdbc.url=jdbc:postgresql://localhost:5432/mydb
+    quarkus.datasource.jdbc.max-size=16
+    quarkus.datasource.jdbc.min-size=2
+    ```
+
+    `db-kind` is only required when more than one driver extension is on the classpath. When a single driver is present Quarkus detects it automatically. All JDBC-specific properties carry the `jdbc.` prefix.
+  </Tab>
+  <Tab title="Reactive">
+    Reactive datasources use the `reactive.` prefix and connect via a Vert.x SQL client:
+
+    ```properties application.properties
+    quarkus.datasource.db-kind=postgresql
+    quarkus.datasource.username=myuser
+    quarkus.datasource.password=secret
+
+    quarkus.datasource.reactive.url=postgresql://localhost:5432/mydb
+    quarkus.datasource.reactive.max-size=20
+    ```
+
+    Reactive datasources are non-blocking and integrate directly with the Vert.x event loop. Use them with Hibernate Reactive or the Reactive SQL clients API.
+  </Tab>
+</Tabs>
+
+### Key configuration properties
+
+| Property | Description |
+|---|---|
+| `quarkus.datasource.db-kind` | Database platform (`postgresql`, `mysql`, `h2`, etc.) |
+| `quarkus.datasource.username` | Database username |
+| `quarkus.datasource.password` | Database password |
+| `quarkus.datasource.jdbc.url` | JDBC connection URL |
+| `quarkus.datasource.jdbc.max-size` | Maximum number of connections in the JDBC pool (default: 20) |
+| `quarkus.datasource.jdbc.min-size` | Minimum number of idle connections maintained in the pool |
+| `quarkus.datasource.reactive.url` | Reactive client connection URL |
+| `quarkus.datasource.reactive.max-size` | Maximum pool size for the reactive client |
+
+### Connection pool sizing
+
+Setting the pool too small causes requests to queue and eventually time out waiting for a connection. Setting it too large puts unnecessary load on the database. Tune `jdbc.max-size` based on your expected concurrency and the database's own connection limits.
+
+## Multiple datasources
+
+When your application needs to connect to more than one database, name the additional datasources using a qualifier in the property key:
+
+```properties application.properties
+# default datasource
+quarkus.datasource.db-kind=postgresql
+quarkus.datasource.jdbc.url=jdbc:postgresql://localhost:5432/primary
+
+# named secondary datasource
+quarkus.datasource."secondary".db-kind=mysql
+quarkus.datasource."secondary".username=reporting
+quarkus.datasource."secondary".password=secret
+quarkus.datasource."secondary".jdbc.url=jdbc:mysql://localhost:3306/reports
+```
+
+Inject the named datasource using the `@DataSource` qualifier:
+
+```java
+import io.agroal.api.AgroalDataSource;
+import io.quarkus.agroal.DataSource;
+import jakarta.inject.Inject;
+
+@Inject
+@DataSource("secondary")
+AgroalDataSource secondaryDs;
+```
+
+Hibernate ORM and Hibernate Reactive also accept a `datasource` property to bind a persistence unit to a named datasource.
+
+## Dev Services
+
+<Note>
+Dev Services require a Docker or Podman container runtime. Databases that run in-process (such as H2) do not require a container.
+</Note>
+
+In development and test mode, Quarkus can start a database container for you automatically — no connection URL or credentials required. Add the driver extension and leave the connection properties empty:
+
+```xml pom.xml
+<dependency>
+    <groupId>io.quarkus</groupId>
+    <artifactId>quarkus-jdbc-postgresql</artifactId>
+</dependency>
+```
+
+```properties application.properties
+# No JDBC URL needed in dev/test — Dev Services handles it
+```
+
+Quarkus detects the absence of explicit connection details and spins up a matching container (e.g., `postgres:latest`). When you supply credentials, the container is configured to use them so you can connect with an external tool.
+
+To prevent Dev Services from applying in production, prefix production-only properties with `%prod.`:
+
+```properties application.properties
+%prod.quarkus.datasource.jdbc.url=jdbc:postgresql://prod-host:5432/mydb
+%prod.quarkus.datasource.username=produser
+%prod.quarkus.datasource.password=prodpassword
+```
+
+<Tip>
+Use `%prod.` prefixes so that production connection details are ignored in dev and test modes, keeping Dev Services active for local development while production configuration remains explicit.
+</Tip>

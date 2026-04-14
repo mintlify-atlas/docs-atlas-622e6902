@@ -1,0 +1,312 @@
+---
+title: "Apache Pulsar Messaging in Quarkus"
+description: "Integrate Quarkus with Apache Pulsar using SmallRye Reactive Messaging to produce and consume messages with schema support and Dev Services."
+keywords: ["quarkus", "pulsar", "smallrye", "reactive messaging", "schema", "avro", "dev services", "subscriptions"]
+---
+
+[Apache Pulsar](https://pulsar.apache.org) is an open-source, cloud-native distributed messaging and streaming platform. It uses a publish-subscribe model: producers write messages to topics, and consumers subscribe to receive them. Unlike Kafka, Pulsar separates compute (brokers) from storage (BookKeeper bookies), enabling elastic scaling of each layer independently.
+
+Quarkus integrates with Pulsar through the `quarkus-messaging-pulsar` extension, built on [SmallRye Reactive Messaging](https://smallrye.io/smallrye-reactive-messaging/) and the Eclipse MicroProfile Reactive Messaging 3.0 specification.
+
+## Adding the extension
+
+```bash
+quarkus extension add messaging-pulsar
+```
+
+Or add it manually:
+
+<CodeGroup>
+
+```xml pom.xml
+<dependency>
+    <groupId>io.quarkus</groupId>
+    <artifactId>quarkus-messaging-pulsar</artifactId>
+</dependency>
+```
+
+```gradle build.gradle
+implementation("io.quarkus:quarkus-messaging-pulsar")
+```
+
+</CodeGroup>
+
+<Note>
+The extension bundles `pulsar-clients-original` and is compatible with Pulsar brokers version 2.10.x and above.
+</Note>
+
+## How channels map to topics
+
+The Pulsar connector (`smallrye-pulsar`) maps Reactive Messaging channels to Pulsar topics. By default, the topic name matches the channel name. Use the `topic` attribute to override.
+
+## Consuming messages
+
+### Minimal configuration
+
+```properties
+# application.properties
+%prod.pulsar.client.serviceUrl=pulsar:6650
+mp.messaging.incoming.prices.connector=smallrye-pulsar
+```
+
+The `%prod` prefix limits the service URL to the production profile. [Dev Services](#dev-services-for-pulsar) handles dev and test automatically.
+
+Configure the consumer to start from the earliest available message:
+
+```properties
+mp.messaging.incoming.prices.serviceUrl=pulsar://pulsar:6650
+mp.messaging.incoming.prices.subscriptionInitialPosition=Earliest
+```
+
+### Consumer bean
+
+```java
+import org.eclipse.microprofile.reactive.messaging.Incoming;
+import jakarta.enterprise.context.ApplicationScoped;
+
+@ApplicationScoped
+public class PriceConsumer {
+
+    @Incoming("prices")
+    public void consume(double price) {
+        // process the price
+    }
+}
+```
+
+### Accessing Pulsar message metadata
+
+Wrap the parameter in `Message<T>` for access to message properties and manual acknowledgment:
+
+```java
+import org.eclipse.microprofile.reactive.messaging.Incoming;
+import org.eclipse.microprofile.reactive.messaging.Message;
+import io.smallrye.reactive.messaging.pulsar.PulsarIncomingMessageMetadata;
+
+@Incoming("prices")
+public CompletionStage<Void> consume(Message<Double> msg) {
+    var meta = msg.getMetadata(PulsarIncomingMessageMetadata.class).orElseThrow();
+    double price = msg.getPayload();
+    return msg.ack();
+}
+```
+
+For direct access to the Pulsar client `Message` object:
+
+```java
+import org.apache.pulsar.client.api.Message;
+
+@Incoming("prices")
+public void consume(Message<Double> msg) {
+    String key = msg.getKey();
+    Double value = msg.getValue();
+    String topic = msg.getTopicName();
+}
+```
+
+### Streaming to a REST endpoint
+
+```java
+import io.smallrye.mutiny.Multi;
+import org.eclipse.microprofile.reactive.messaging.Channel;
+import jakarta.inject.Inject;
+import jakarta.ws.rs.*;
+import jakarta.ws.rs.core.MediaType;
+import org.jboss.resteasy.reactive.RestStreamElementType;
+
+@Path("/prices")
+public class PriceResource {
+
+    @Inject
+    @Channel("prices")
+    Multi<Double> prices;
+
+    @GET
+    @RestStreamElementType(MediaType.TEXT_PLAIN)
+    public Multi<Double> stream() {
+        return prices;
+    }
+}
+```
+
+## Producing messages
+
+### With @Outgoing
+
+```java
+import io.smallrye.mutiny.Multi;
+import org.eclipse.microprofile.reactive.messaging.Outgoing;
+import jakarta.enterprise.context.ApplicationScoped;
+import java.time.Duration;
+import java.util.concurrent.ThreadLocalRandom;
+
+@ApplicationScoped
+public class PriceGenerator {
+
+    @Outgoing("prices")
+    public Multi<Double> generate() {
+        return Multi.createFrom().ticks().every(Duration.ofSeconds(1))
+            .map(tick -> ThreadLocalRandom.current().nextDouble(100));
+    }
+}
+```
+
+```properties
+mp.messaging.outgoing.prices.connector=smallrye-pulsar
+```
+
+### With Emitter
+
+```java
+import org.eclipse.microprofile.reactive.messaging.Channel;
+import org.eclipse.microprofile.reactive.messaging.Emitter;
+import jakarta.inject.Inject;
+import jakarta.ws.rs.*;
+
+@Path("/prices")
+public class PriceEndpoint {
+
+    @Inject
+    @Channel("prices")
+    Emitter<Double> emitter;
+
+    @POST
+    public CompletionStage<Void> addPrice(double price) {
+        return emitter.send(price);
+    }
+}
+```
+
+## Blocking processing
+
+Consumer methods run on the Vert.x I/O thread. For blocking work, use `@Blocking`:
+
+```java
+import io.smallrye.reactive.messaging.annotations.Blocking;
+import org.eclipse.microprofile.reactive.messaging.Incoming;
+import jakarta.transaction.Transactional;
+
+@ApplicationScoped
+public class PriceStorage {
+
+    @Incoming("prices")
+    @Transactional
+    public void store(int priceInUsd) {
+        Price price = new Price();
+        price.value = priceInUsd;
+        price.persist();
+    }
+}
+```
+
+## Subscription types
+
+Pulsar's `subscriptionType` setting determines how messages are dispatched to consumers:
+
+| Type | Behavior |
+|------|----------|
+| `Exclusive` (default) | Only one consumer per subscription. Useful for fan-out pub/sub. |
+| `Shared` | Multiple consumers share a subscription; messages are distributed. |
+| `Key_Shared` | Messages with the same key always go to the same consumer. |
+| `Failover` | Multiple consumers, but only one is active at a time. |
+
+```properties
+mp.messaging.incoming.prices.subscriptionType=Shared
+mp.messaging.incoming.prices.subscriptionName=my-consumer-group
+```
+
+<Note>
+If no `subscriptionName` is provided, Quarkus generates a unique name automatically. For `Shared` or `Key_Shared` use cases, set the subscription name explicitly so multiple application instances join the same subscription.
+</Note>
+
+## Schema support
+
+The Pulsar connector can enforce and validate message schemas. Configure the schema type via the `schema` attribute. Pulsar supports built-in primitive schemas and complex schemas including JSON, Avro, and Protobuf.
+
+### JSON schema
+
+```properties
+mp.messaging.incoming.prices.schema=JSON
+mp.messaging.incoming.prices.value.type=org.acme.Price
+```
+
+### Avro schema
+
+```properties
+mp.messaging.outgoing.prices.schema=AVRO
+```
+
+For Avro, your message class must be an Avro-generated type or implement `org.apache.avro.specific.SpecificRecord`.
+
+### Protobuf schema
+
+```properties
+mp.messaging.outgoing.prices.schema=PROTOBUF
+```
+
+## Full configuration example
+
+```properties
+# application.properties
+
+# Broker — prod only; Dev Services covers dev/test
+%prod.pulsar.client.serviceUrl=pulsar:6650
+
+# Incoming channel
+mp.messaging.incoming.prices.connector=smallrye-pulsar
+mp.messaging.incoming.prices.topic=price-updates
+mp.messaging.incoming.prices.subscriptionInitialPosition=Earliest
+mp.messaging.incoming.prices.subscriptionName=price-consumer
+
+# Outgoing channel
+mp.messaging.outgoing.my-prices.connector=smallrye-pulsar
+mp.messaging.outgoing.my-prices.topic=price-updates
+```
+
+## Acknowledgement strategies
+
+All messages must be acknowledged. Pulsar supports two strategies:
+
+- **Individual** (default) — one ack per message.
+- **Cumulative** — acks all messages up to and including the specified one. Configure with `ack-strategy=cumulative`.
+
+```properties
+mp.messaging.incoming.prices.ack-strategy=cumulative
+```
+
+## Dev Services for Pulsar
+
+Quarkus automatically starts a Pulsar broker container during dev mode and tests when `pulsar.client.serviceUrl` is not explicitly configured (or is production-profile-only). No additional setup is needed.
+
+<Tip>
+You can inspect the running Pulsar container in the Dev UI at `http://localhost:8080/q/dev-ui`.
+</Tip>
+
+To disable Dev Services:
+
+```properties
+quarkus.pulsar.devservices.enabled=false
+```
+
+## How Pulsar differs from Kafka
+
+While both are high-throughput distributed messaging platforms, there are important differences to keep in mind:
+
+| Feature | Kafka | Pulsar |
+|---------|-------|--------|
+| Storage | Brokers own storage | Stateless brokers, BookKeeper for storage |
+| Multi-topic subscriptions | Requires regex or manual topic list | Native topic patterns and namespaces |
+| Geo-replication | Requires MirrorMaker | Built-in, configurable per namespace |
+| Schema registry | External (Confluent, Apicurio) | Built-in schema registry |
+| Subscription model | Consumer groups | Named subscriptions with configurable types |
+
+## Further reading
+
+<CardGroup cols={2}>
+  <Card title="Reactive Messaging overview" icon="diagram-project" href="/messaging">
+    Core annotations, channel wiring, and connector model for all brokers.
+  </Card>
+  <Card title="Apache Kafka" icon="bolt" href="/kafka">
+    Kafka-specific configuration, serialization, and Dev Services.
+  </Card>
+</CardGroup>

@@ -1,0 +1,467 @@
+---
+title: "Testing Secured Quarkus Endpoints"
+description: "Write tests for secured Quarkus applications using @TestSecurity, @OidcSecurity, and WireMock to simulate authentication without a real identity provider."
+keywords: ["quarkus", "security testing", "TestSecurity", "OidcSecurity", "WireMock", "Keycloak", "RestAssured", "JWT"]
+---
+
+Testing secured endpoints requires simulating authenticated users without running a real identity provider. Quarkus provides the `quarkus-test-security` extension and a set of annotations that let you set the authenticated user, their roles, and token claims directly in test code. For OIDC-specific scenarios, `OidcWiremockTestResource` and Dev Services for Keycloak give you more complete integration coverage.
+
+## Adding the test security extension
+
+```xml
+<dependency>
+    <groupId>io.quarkus</groupId>
+    <artifactId>quarkus-test-security</artifactId>
+    <scope>test</scope>
+</dependency>
+```
+
+```groovy
+testImplementation("io.quarkus:quarkus-test-security")
+```
+
+<Warning>
+`@TestSecurity` only works with `@QuarkusTest`. It does not work with `@QuarkusIntegrationTest`.
+</Warning>
+
+## @TestSecurity annotation
+
+`@TestSecurity` controls the `SecurityIdentity` for a test method or an entire test class. It can set the username, roles, permissions, and custom attributes.
+
+### Disable authorization
+
+Skip all authorization checks to access any endpoint without credentials:
+
+```java
+import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.security.TestSecurity;
+import io.restassured.RestAssured;
+import org.junit.jupiter.api.Test;
+
+@QuarkusTest
+public class SecurityDisabledTest {
+
+    @Test
+    @TestSecurity(authorizationEnabled = false)
+    void testWithoutAuth() {
+        RestAssured.when().get("/api/admin")
+                .then().statusCode(200);
+    }
+}
+```
+
+### Set user and roles
+
+Run a test as a specific user with a set of roles:
+
+```java
+@QuarkusTest
+public class RoleBasedTest {
+
+    @Test
+    @TestSecurity(user = "alice", roles = {"admin", "user"})
+    void testAdminEndpoint() {
+        RestAssured.when().get("/api/admin")
+                .then().statusCode(200);
+    }
+
+    @Test
+    @TestSecurity(user = "bob", roles = "user")
+    void testAdminForbiddenForUser() {
+        RestAssured.when().get("/api/admin")
+                .then().statusCode(403);
+    }
+}
+```
+
+### Set custom attributes
+
+Test endpoint code that reads attributes from `SecurityIdentity`:
+
+```java
+import io.quarkus.security.identity.SecurityIdentity;
+import io.quarkus.test.security.SecurityAttribute;
+import io.quarkus.test.security.SecurityAttribute.AttributeType;
+import io.quarkus.test.security.TestSecurity;
+import jakarta.inject.Inject;
+import org.junit.jupiter.api.Test;
+
+@QuarkusTest
+public class AttributeTest {
+
+    @Inject
+    SecurityIdentity identity;
+
+    @Test
+    @TestSecurity(
+        user = "testUser",
+        roles = {"admin"},
+        attributes = {
+            @SecurityAttribute(key = "tenant", value = "acme", type = AttributeType.STRING),
+            @SecurityAttribute(key = "level", value = "5", type = AttributeType.LONG)
+        }
+    )
+    void testWithAttributes() {
+        String tenant = identity.getAttribute("tenant");
+        Long level = identity.<Long>getAttribute("level");
+        // assert on tenant and level
+    }
+}
+```
+
+### Set permissions
+
+Test endpoints protected with `@PermissionsAllowed`:
+
+```java
+@Test
+@TestSecurity(user = "alice", permissions = "see:detail")
+void testPermissionGranted() {
+    // endpoint annotated with @PermissionsAllowed("see:detail") will be accessible
+    RestAssured.when().get("/api/detail")
+            .then().statusCode(200);
+}
+```
+
+### Reuse with meta-annotations
+
+If the same security setup appears in many tests, consolidate it into a meta-annotation:
+
+```java
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
+import io.quarkus.test.security.TestSecurity;
+
+@Retention(RetentionPolicy.RUNTIME)
+@Target({ElementType.METHOD, ElementType.TYPE})
+@TestSecurity(user = "alice", roles = {"admin", "user"})
+public @interface AsAlice {
+}
+```
+
+Then use it anywhere:
+
+```java
+@Test
+@AsAlice
+void testAsAlice() {
+    RestAssured.when().get("/api/profile").then().statusCode(200);
+}
+```
+
+## @TestSecurity with OIDC claims (@OidcSecurity)
+
+For endpoints that inject `JsonWebToken` or depend on OIDC-specific claims, use `@OidcSecurity` alongside `@TestSecurity`.
+
+Add the OIDC test security dependency:
+
+```xml
+<dependency>
+    <groupId>io.quarkus</groupId>
+    <artifactId>quarkus-test-security-oidc</artifactId>
+    <scope>test</scope>
+</dependency>
+```
+
+```groovy
+testImplementation("io.quarkus:quarkus-test-security-oidc")
+```
+
+Set OIDC token claims in tests:
+
+```java
+import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.security.TestSecurity;
+import io.quarkus.test.security.oidc.Claim;
+import io.quarkus.test.security.oidc.OidcSecurity;
+import io.quarkus.test.security.oidc.TokenIntrospection;
+import io.restassured.RestAssured;
+import org.junit.jupiter.api.Test;
+
+@QuarkusTest
+public class OidcSecurityTest {
+
+    @Test
+    @TestSecurity(user = "alice", roles = "user")
+    @OidcSecurity(claims = {
+            @Claim(key = "email", value = "alice@example.com"),
+            @Claim(key = "preferred_username", value = "alice")
+    })
+    void testWithOidcClaims() {
+        RestAssured.when().get("/api/me")
+                .then()
+                .statusCode(200)
+                .body(org.hamcrest.Matchers.containsString("alice@example.com"));
+    }
+
+    @Test
+    @TestSecurity(user = "alice", roles = "user")
+    @OidcSecurity(
+        introspectionRequired = true,
+        introspection = {
+            @TokenIntrospection(key = "email", value = "alice@example.com")
+        }
+    )
+    void testWithIntrospection() {
+        RestAssured.when().get("/api/me")
+                .then().statusCode(200);
+    }
+}
+```
+
+`@TestSecurity` is always required. Its `user` property is returned by `JsonWebToken.getName()`, and `roles` maps to `JsonWebToken.getGroups()`. `@OidcSecurity` is optional and sets additional token claims.
+
+## JWT-specific claim injection with @JwtSecurity
+
+For applications using `quarkus-smallrye-jwt` (not `quarkus-oidc`), use `@JwtSecurity` instead of `@OidcSecurity`:
+
+```xml
+<dependency>
+    <groupId>io.quarkus</groupId>
+    <artifactId>quarkus-test-security-jwt</artifactId>
+    <scope>test</scope>
+</dependency>
+```
+
+```java
+import io.quarkus.test.security.TestSecurity;
+import io.quarkus.test.security.jwt.Claim;
+import io.quarkus.test.security.jwt.JwtSecurity;
+import io.restassured.RestAssured;
+import org.junit.jupiter.api.Test;
+
+@QuarkusTest
+public class JwtSecurityTest {
+
+    @Test
+    @TestSecurity(user = "jdoe", roles = "viewer")
+    @JwtSecurity(claims = {
+            @Claim(key = "email", value = "jdoe@example.com"),
+            @Claim(key = "birthdate", value = "1990-01-01")
+    })
+    void testJwtEndpoint() {
+        RestAssured.when().get("/secured/roles-allowed")
+                .then().statusCode(200);
+    }
+}
+```
+
+## Mixing @TestSecurity with real tokens
+
+When you need to test that both `@TestSecurity` identities and real bearer tokens work in the same test, you can combine them. The bearer token takes precedence when an `Authorization: Bearer` header is present:
+
+```java
+@Test
+@TestSecurity(user = "Bob")
+public void testMixedAuth() {
+    // Uses a real token — Alice is authenticated
+    RestAssured.given()
+            .auth().oauth2(getTokenForUser("Alice"))
+            .get("/hello")
+            .then()
+            .statusCode(200)
+            .body(org.hamcrest.Matchers.is("Hello Alice"));
+
+    // No header — TestSecurity creates Bob
+    RestAssured.given()
+            .get("/hello")
+            .then()
+            .statusCode(200)
+            .body(org.hamcrest.Matchers.is("Hello Bob"));
+}
+```
+
+When mixing `@TestSecurity` with Basic Auth, enable Basic Auth explicitly:
+
+```properties
+%test.quarkus.http.auth.basic=true
+```
+
+## Path-based authentication in tests
+
+If your application uses different authentication mechanisms for different paths, use `authMechanism` to select the right one:
+
+```java
+@Test
+@TestSecurity(user = "testUser", roles = {"admin"}, authMechanism = "basic")
+void testBasicAuthPath() {
+    RestAssured.when().get("/basic-only")
+            .then().statusCode(200);
+}
+
+@Test
+@TestSecurity(user = "testUser", roles = {"admin"}, authMechanism = "form")
+void testFormAuthPath() {
+    RestAssured.when().get("/form-only")
+            .then().statusCode(200);
+}
+```
+
+## WireMock for OIDC integration tests
+
+`OidcWiremockTestResource` stubs out the OIDC provider endpoints using WireMock. It provides the best integration coverage because the full HTTP communication path is tested.
+
+Add the dependency:
+
+```xml
+<dependency>
+    <groupId>io.quarkus</groupId>
+    <artifactId>quarkus-test-oidc-server</artifactId>
+    <scope>test</scope>
+</dependency>
+```
+
+```groovy
+testImplementation("io.quarkus:quarkus-test-oidc-server")
+```
+
+Configure the application to use the WireMock endpoint:
+
+```properties
+# keycloak.url is injected by OidcWiremockTestResource
+quarkus.oidc.auth-server-url=${keycloak.url:replaced-by-test-resource}/realms/quarkus/
+quarkus.oidc.client-id=quarkus-service-app
+quarkus.oidc.application-type=service
+```
+
+Write the test. `OidcWiremockTestResource` includes a signing RSA key in JWK format and exposes `smallrye.jwt.sign.key.location` automatically, so you can sign tokens with a no-argument `Jwt.sign()`:
+
+```java
+import static org.hamcrest.Matchers.equalTo;
+import java.util.Set;
+import io.quarkus.test.common.QuarkusTestResource;
+import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.oidc.server.OidcWiremockTestResource;
+import io.restassured.RestAssured;
+import io.smallrye.jwt.build.Jwt;
+import org.junit.jupiter.api.Test;
+
+@QuarkusTest
+@QuarkusTestResource(OidcWiremockTestResource.class)
+public class BearerTokenAuthorizationTest {
+
+    @Test
+    public void testBearerToken() {
+        RestAssured.given()
+                .auth().oauth2(getAccessToken("alice", Set.of("user")))
+                .when().get("/api/users/me")
+                .then()
+                .statusCode(200)
+                .body("userName", equalTo("alice"));
+    }
+
+    @Test
+    public void testBearerTokenForbidden() {
+        RestAssured.given()
+                .auth().oauth2(getAccessToken("bob", Set.of("viewer")))
+                .when().get("/api/admin")
+                .then()
+                .statusCode(403);
+    }
+
+    private String getAccessToken(String userName, Set<String> groups) {
+        return Jwt.preferredUserName(userName)
+                .groups(groups)
+                .issuer("https://server.example.com")
+                .audience("https://service.example.com")
+                .sign();
+    }
+}
+```
+
+<Note>
+`OidcWiremockTestResource` does not work with `@QuarkusIntegrationTest` when the Quarkus app runs in a Docker container, because the WireMock server runs in the test JVM which is not reachable from inside the container.
+</Note>
+
+## Dev Services for Keycloak in tests
+
+For full end-to-end Keycloak integration, use Dev Services for Keycloak. It starts a real Keycloak container and auto-configures `quarkus-oidc`. Add the test client:
+
+```xml
+<dependency>
+    <groupId>io.quarkus</groupId>
+    <artifactId>quarkus-test-keycloak-server</artifactId>
+    <scope>test</scope>
+</dependency>
+```
+
+Scope the production OIDC URL to the `prod` profile so that Dev Services kicks in during tests:
+
+```properties
+%prod.quarkus.oidc.auth-server-url=http://localhost:8180/realms/quarkus
+```
+
+Then use `KeycloakTestClient` to obtain real tokens from the running Keycloak container:
+
+```java
+import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.keycloak.client.KeycloakTestClient;
+import io.restassured.RestAssured;
+import org.junit.jupiter.api.Test;
+
+@QuarkusTest
+public class KeycloakIntegrationTest {
+
+    KeycloakTestClient keycloakClient = new KeycloakTestClient();
+
+    @Test
+    public void testAliceHasAdminAccess() {
+        // alice has roles: admin, user
+        RestAssured.given()
+                .auth().oauth2(keycloakClient.getAccessToken("alice"))
+                .when().get("/api/admin")
+                .then()
+                .statusCode(200);
+    }
+
+    @Test
+    public void testBobLacksAdminAccess() {
+        // bob has role: user only
+        RestAssured.given()
+                .auth().oauth2(keycloakClient.getAccessToken("bob"))
+                .when().get("/api/admin")
+                .then()
+                .statusCode(403);
+    }
+}
+```
+
+To import a custom Keycloak realm before the tests run:
+
+```properties
+%prod.quarkus.oidc.auth-server-url=http://localhost:8180/realms/my-realm
+quarkus.keycloak.devservices.realm-path=my-realm.json
+```
+
+For native mode integration tests, extend the JVM test class with `@QuarkusIntegrationTest`:
+
+```java
+import io.quarkus.test.junit.QuarkusIntegrationTest;
+
+@QuarkusIntegrationTest
+public class NativeKeycloakIT extends KeycloakIntegrationTest {
+}
+```
+
+## Configuring embedded users for dev/test
+
+For simple scenarios that do not require OIDC or JWT, embed user credentials in `application.properties` scoped to the dev or test profile:
+
+```properties
+# Dev and test only — use OAuth2 in production
+%dev.quarkus.security.users.embedded.enabled=true
+%dev.quarkus.security.users.embedded.plain-text=true
+%dev.quarkus.security.users.embedded.users.alice=password
+%dev.quarkus.security.users.embedded.users.bob=password
+%dev.quarkus.security.users.embedded.roles.alice=admin,user
+%dev.quarkus.security.users.embedded.roles.bob=user
+
+# Production OAuth2 configuration
+quarkus.oauth2.enabled=true
+%dev.quarkus.oauth2.enabled=false
+quarkus.oauth2.client-id=my-client
+quarkus.oauth2.client-secret=my-secret
+quarkus.oauth2.introspection-url=http://auth-server/introspect
+```

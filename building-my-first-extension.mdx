@@ -1,0 +1,336 @@
+---
+title: "Build Your First Quarkus Extension"
+description: "Step-by-step guide to creating a Quarkus extension from scratch — scaffold the project, write a BuildStep, record runtime behavior, and test your extension."
+keywords: ["quarkus", "extension", "tutorial", "BuildStep", "deployment", "runtime", "maven", "gradle"]
+---
+
+Quarkus extensions let you integrate a library or framework into the Quarkus build pipeline, so that initialization work that traditionally happens at startup instead happens once at build time. This guide walks through building a simple extension — a greeting HTTP endpoint — from the initial scaffold to a passing test.
+
+<Note>
+This guide focuses on the mechanics of extension development. The greeting servlet is an intentionally simple example; it is not representative of the full power of build-time optimization. See [How Quarkus Extensions Work](/writing-extensions) for the conceptual background.
+</Note>
+
+## Prerequisites
+
+- JDK 17 or later
+- Maven 3.9+ or Gradle 8+
+- Basic familiarity with Quarkus and CDI
+
+---
+
+## Basic concepts
+
+Before writing code, a few terms are worth clarifying.
+
+**JVM mode vs. native mode.** Quarkus runs as a standard JVM application (JVM mode) or compiles to a native executable using GraalVM (native mode). Extensions must work correctly in both.
+
+**Build time vs. runtime.** The _build time_ (augmentation) phase is when the extension processes annotations, reads configuration, and generates bytecode. The _runtime_ phase is when the compiled application runs. The goal of an extension is to shift as much work as possible from runtime to build time.
+
+**The two modules.** Every extension consists of:
+
+- A **runtime** module — what users add as a dependency. Contains the public API and runtime behavior.
+- A **deployment** module — used only during augmentation. Contains `@BuildStep` processors that configure the runtime module for inclusion in the application.
+
+---
+
+## Steps
+
+<Steps>
+  <Step title="Scaffold the extension project">
+    Use the Quarkus Maven plugin to generate the extension skeleton. Run the following from an empty directory:
+
+    ```bash
+    mvn io.quarkus.platform:quarkus-maven-plugin:3.x.x:create-extension -N \
+        -DgroupId=org.acme \
+        -DextensionId=greeting-extension \
+        -DwithoutTests
+    ```
+
+    Or use the Quarkus CLI:
+
+    ```bash
+    quarkus create extension org.acme:greeting-extension
+    ```
+
+    The generator detects that you are outside a Quarkus source tree and creates a **standalone** extension layout. You will see output like:
+
+    ```
+    Detected layout type is 'standalone'
+    Generated runtime artifactId is 'greeting-extension'
+
+    applying codestarts...
+      java
+      maven
+      quarkus-extension
+      extension-base
+
+    extension has been successfully generated in:
+    --> /your/path/greeting-extension
+    ```
+
+    <Tip>
+    Run the mojo without any parameters to use interactive mode: `mvn io.quarkus.platform:quarkus-maven-plugin:3.x.x:create-extension -N`
+    </Tip>
+  </Step>
+
+  <Step title="Understand the generated project structure">
+    The generator creates a multi-module Maven project:
+
+    ```
+    greeting-extension/
+    ├── pom.xml                          # Parent POM
+    ├── runtime/
+    │   ├── pom.xml                      # Runtime module
+    │   └── src/main/resources/
+    │       └── META-INF/
+    │           └── quarkus-extension.yaml
+    └── deployment/
+        ├── pom.xml                      # Deployment module
+        └── src/main/java/org/acme/greeting/extension/deployment/
+            └── GreetingExtensionProcessor.java
+    ```
+
+    Key points from the generated POMs:
+
+    - The **runtime** `pom.xml` includes `quarkus-extension-maven-plugin`, which generates the extension descriptor linking the runtime artifact to its deployment counterpart.
+    - The **deployment** `pom.xml` depends on the runtime module and includes `quarkus-extension-processor` as an annotation processor.
+    - The parent `pom.xml` imports `quarkus-bom` to align dependency versions with Quarkus.
+
+    The generated `GreetingExtensionProcessor` class is the entry point for all build-time logic:
+
+    ```java
+    class GreetingExtensionProcessor {
+
+        private static final String FEATURE = "greeting-extension";
+
+        @BuildStep
+        FeatureBuildItem feature() {
+            return new FeatureBuildItem(FEATURE);
+        }
+    }
+    ```
+
+    This minimal step declares a named feature, which Quarkus logs at startup: `Installed features: [greeting-extension]`.
+  </Step>
+
+  <Step title="Add runtime behavior">
+    The runtime module is where you implement the capability your extension exposes to users.
+
+    First, add `quarkus-undertow` as a runtime dependency so the extension can register a servlet:
+
+    ```xml
+    <!-- runtime/pom.xml -->
+    <dependency>
+        <groupId>io.quarkus</groupId>
+        <artifactId>quarkus-undertow</artifactId>
+    </dependency>
+    ```
+
+    Then create the servlet in the runtime module:
+
+    ```java
+    // runtime/src/main/java/org/acme/greeting/extension/GreetingExtensionServlet.java
+    package org.acme.greeting.extension;
+
+    import jakarta.servlet.annotation.WebServlet;
+    import jakarta.servlet.http.HttpServlet;
+    import jakarta.servlet.http.HttpServletRequest;
+    import jakarta.servlet.http.HttpServletResponse;
+    import java.io.IOException;
+
+    @WebServlet
+    public class GreetingExtensionServlet extends HttpServlet {
+
+        @Override
+        protected void doGet(HttpServletRequest req, HttpServletResponse resp)
+                throws IOException {
+            resp.getWriter().write("Hello");
+        }
+    }
+    ```
+  </Step>
+
+  <Step title="Write a BuildStep to register the servlet">
+    The deployment module tells Quarkus how to deploy the servlet. Add `quarkus-undertow-deployment` to the deployment module's dependencies:
+
+    ```xml
+    <!-- deployment/pom.xml -->
+    <dependency>
+        <groupId>io.quarkus</groupId>
+        <artifactId>quarkus-undertow-deployment</artifactId>
+    </dependency>
+    ```
+
+    Update `GreetingExtensionProcessor` to produce a `ServletBuildItem`:
+
+    ```java
+    package org.acme.greeting.extension.deployment;
+
+    import io.quarkus.deployment.annotations.BuildStep;
+    import io.quarkus.deployment.builditem.FeatureBuildItem;
+    import io.quarkus.undertow.deployment.ServletBuildItem;
+    import org.acme.greeting.extension.GreetingExtensionServlet;
+
+    class GreetingExtensionProcessor {
+
+        private static final String FEATURE = "greeting-extension";
+
+        @BuildStep
+        FeatureBuildItem feature() {
+            return new FeatureBuildItem(FEATURE);
+        }
+
+        @BuildStep
+        ServletBuildItem createServlet() {
+            return ServletBuildItem
+                .builder("greeting-extension", GreetingExtensionServlet.class.getName())
+                .addMapping("/greeting")
+                .build();
+        }
+    }
+    ```
+
+    When Quarkus augments an application that depends on this extension, it processes `createServlet()` at build time and records servlet registration bytecode — no classpath scanning at startup.
+  </Step>
+
+  <Step title="Add configuration with @ConfigRoot">
+    To make the greeting message configurable, define a `@ConfigRoot` class in the runtime module:
+
+    ```java
+    package org.acme.greeting.extension;
+
+    import io.quarkus.runtime.annotations.ConfigPhase;
+    import io.quarkus.runtime.annotations.ConfigRoot;
+    import io.smallrye.config.ConfigMapping;
+    import io.smallrye.config.WithDefault;
+
+    @ConfigMapping(prefix = "quarkus.greeting")
+    @ConfigRoot(phase = ConfigPhase.RUN_TIME)
+    public interface GreetingConfig {
+
+        /** The message returned by the /greeting endpoint. */
+        @WithDefault("Hello")
+        String message();
+    }
+    ```
+
+    Inject the config into your servlet or into a recorder for use in a `@Record` build step. Configuration properties defined here automatically appear in `application.properties` with the `quarkus.greeting.` prefix.
+
+    <Tip>
+    Prefer `ConfigPhase.BUILD_TIME` for feature flags and driver class names — values that affect what code is compiled into the application. Use `ConfigPhase.RUN_TIME` for values like hostnames, ports, and passwords that must remain overridable without a rebuild.
+    </Tip>
+  </Step>
+
+  <Step title="Record runtime behavior with @Record">
+    When runtime initialization depends on values collected at build time, use a _recorder_. A recorder is a class annotated with `@Recorder` in the runtime module. Its methods are called from a `@BuildStep` annotated with `@Record`, and the calls are replayed as generated bytecode at startup.
+
+    ```java
+    // runtime module
+    package org.acme.greeting.extension;
+
+    import io.quarkus.runtime.annotations.Recorder;
+
+    @Recorder
+    public class GreetingRecorder {
+
+        public void setMessage(String message) {
+            GreetingState.message = message;
+        }
+    }
+    ```
+
+    ```java
+    // deployment module
+    @BuildStep
+    @Record(ExecutionTime.STATIC_INIT)
+    void recordGreeting(GreetingRecorder recorder, GreetingBuildConfig config) {
+        recorder.setMessage(config.message());
+    }
+    ```
+
+    Bytecode recorded with `STATIC_INIT` runs before `main()`. In native mode, the result is serialized directly into the executable — the code does not execute again on startup. Use `RUNTIME_INIT` for anything that must run on every start, such as opening network connections.
+  </Step>
+
+  <Step title="Test the extension">
+    Tests for extensions live in the **deployment** module. Quarkus provides `QuarkusExtensionTest` (via `quarkus-junit-internal`) to start a minimal Quarkus application with your extension active.
+
+    Add the test dependencies:
+
+    ```xml
+    <!-- deployment/pom.xml -->
+    <dependency>
+        <groupId>io.quarkus</groupId>
+        <artifactId>quarkus-junit-internal</artifactId>
+        <scope>test</scope>
+    </dependency>
+    <dependency>
+        <groupId>io.rest-assured</groupId>
+        <artifactId>rest-assured</artifactId>
+        <scope>test</scope>
+    </dependency>
+    ```
+
+    Write a test class:
+
+    ```java
+    package org.acme.greeting.extension.deployment;
+
+    import io.quarkus.test.QuarkusExtensionTest;
+    import io.restassured.RestAssured;
+    import org.junit.jupiter.api.Test;
+    import org.junit.jupiter.api.extension.RegisterExtension;
+
+    import static org.hamcrest.Matchers.containsString;
+
+    public class GreetingExtensionTest {
+
+        @RegisterExtension
+        static final QuarkusExtensionTest config = new QuarkusExtensionTest()
+            .withEmptyApplication();
+
+        @Test
+        public void testGreeting() {
+            RestAssured.when()
+                .get("/greeting")
+                .then()
+                .statusCode(200)
+                .body(containsString("Hello"));
+        }
+    }
+    ```
+
+    Run the build:
+
+    ```bash
+    mvn clean install
+    ```
+
+    A successful run will show your feature listed in the Quarkus startup log:
+
+    ```
+    Installed features: [cdi, greeting-extension, servlet]
+    ```
+  </Step>
+
+  <Step title="Publish to Maven Central">
+    Publishing a Quarkus extension follows the same process as any Maven artifact. A few extension-specific things to check before release:
+
+    1. **Fill in `quarkus-extension.yaml`** in `runtime/src/main/resources/META-INF/`. Include `name`, `description`, `keywords`, `categories`, `status`, and a `guide` URL. This metadata drives how your extension appears in the Quarkus extension registry and on `code.quarkus.io`.
+
+    2. **Consider Quarkiverse** for community extensions. The [Quarkiverse Hub](https://github.com/quarkiverse) provides a home for extensions that are not part of Quarkus core, with automated release pipelines and registry publishing. Use `groupId=io.quarkiverse.[extensionId]` when scaffolding to get the Quarkiverse layout.
+
+    3. **Publish the runtime artifact only.** Users depend on the runtime artifact. The deployment artifact is resolved automatically by Quarkus from the extension descriptor. Both artifacts must be published to the same repository, but only the runtime artifact should be mentioned in user documentation.
+
+    ```bash
+    mvn deploy -Prelease
+    ```
+  </Step>
+</Steps>
+
+---
+
+## What to explore next
+
+- [How Quarkus Extensions Work](/writing-extensions) — deep dive into the build step pipeline, build item types, and bootstrap phases.
+- [Quarkus Extension Metadata](/extension-metadata) — configure `quarkus-extension.yaml`, declare capabilities, and register your extension.
+- [Adding Codestarts to Quarkus Extensions](/extension-codestart) — generate starter code when developers add your extension to a new project.

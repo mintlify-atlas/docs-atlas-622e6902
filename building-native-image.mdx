@@ -1,0 +1,268 @@
+---
+title: "Building Native Executables with GraalVM"
+description: "Compile Quarkus applications to GraalVM native executables for near-instant startup, low memory usage, and deployment in container-based environments."
+---
+
+Native compilation transforms your Quarkus application into a platform-specific binary that starts in milliseconds and uses a fraction of the memory of a JVM-based deployment. The native executable bundles your application code, required libraries, Java APIs, and a stripped-down VM base — removing everything that is not reachable at runtime.
+
+## Prerequisites
+
+Before building a native executable you need either **GraalVM** or **Mandrel** installed, along with the `native-image` tool. You also need a working C development environment on your platform.
+
+### GraalVM vs. Mandrel
+
+| | GraalVM CE / EE | Mandrel |
+|---|---|---|
+| Maintained by | Oracle | Red Hat |
+| Polyglot support | Yes | No |
+| Recommended for | macOS / Windows / Linux bare metal | Linux container environments |
+| Distribution size | Larger | Smaller |
+
+<Note>
+Mandrel is the recommended distribution for building native executables that target Linux container environments. If you are targeting macOS (amd64) or Windows, use Oracle GraalVM CE instead.
+</Note>
+
+### Installing GraalVM
+
+<Steps>
+  <Step title="Download and install">
+    Install GraalVM from [GitHub releases](https://github.com/graalvm/graalvm-ce-builds/releases) or Mandrel from [Mandrel releases](https://github.com/graalvm/mandrel/releases). Using `sdkman` is the simplest approach on Linux and macOS:
+
+    ```bash
+    sdk install java 21-graalce
+    ```
+  </Step>
+  <Step title="Set GRAALVM_HOME">
+    ```bash
+    export GRAALVM_HOME=$HOME/Development/graalvm
+    # macOS (Apple Silicon)
+    export GRAALVM_HOME=$HOME/Development/graalvm/Contents/Home
+    ```
+  </Step>
+  <Step title="Set JAVA_HOME and PATH (optional)">
+    ```bash
+    export JAVA_HOME=${GRAALVM_HOME}
+    export PATH=${GRAALVM_HOME}/bin:$PATH
+    ```
+  </Step>
+</Steps>
+
+### C build dependencies
+
+Native compilation requires a C toolchain.
+
+<Tabs>
+  <Tab title="Linux (RPM)">
+    ```bash
+    sudo dnf install gcc glibc-devel zlib-devel libstdc++-static
+    ```
+  </Tab>
+  <Tab title="Linux (Debian/Ubuntu)">
+    ```bash
+    sudo apt-get install build-essential libz-dev zlib1g-dev
+    ```
+  </Tab>
+  <Tab title="macOS">
+    ```bash
+    xcode-select --install
+    ```
+  </Tab>
+  <Tab title="Windows">
+    Install [Visual Studio 2022 Build Tools](https://aka.ms/vs/17/release/vs_buildtools.exe), then open the **x64 Native Tools Command Prompt** before running builds.
+  </Tab>
+</Tabs>
+
+## Building a native executable
+
+### With Maven
+
+Add the `native` Maven profile to your `pom.xml`:
+
+```xml
+<profiles>
+  <profile>
+    <id>native</id>
+    <activation>
+      <property>
+        <name>native</name>
+      </property>
+    </activation>
+    <properties>
+      <skipITs>false</skipITs>
+      <quarkus.native.enabled>true</quarkus.native.enabled>
+    </properties>
+  </profile>
+</profiles>
+```
+
+Then build:
+
+```bash
+./mvnw package -Dnative
+```
+
+### With the Quarkus CLI
+
+```bash
+quarkus build --native
+```
+
+### With Gradle
+
+```bash
+./gradlew build -Dquarkus.native.enabled=true
+```
+
+Once the build completes, run the binary:
+
+```bash
+./target/*-runner
+```
+
+<Tip>
+Native compilation takes several minutes. Using a Maven profile (as above) is preferred over passing `-Dquarkus.native.enabled=true` inline, because it also enables native integration tests.
+</Tip>
+
+## Container-based builds (no local GraalVM required)
+
+If you cannot install GraalVM locally, Quarkus can delegate the native build to a Docker/Podman container that ships the required toolchain:
+
+```bash
+./mvnw package -Dnative -Dquarkus.native.container-build=true
+```
+
+Quarkus will pull `quay.io/quarkus/ubi9-quarkus-mandrel-builder-image` by default. You can override the image:
+
+```properties
+quarkus.native.builder-image=quay.io/quarkus/ubi9-quarkus-mandrel-builder-image:latest
+```
+
+<Note>
+Container builds always produce Linux x86_64 binaries regardless of your host OS. This is ideal for building images that will be deployed to Linux containers.
+</Note>
+
+## Native-specific configuration
+
+Some Java features require explicit registration at build time because GraalVM performs closed-world analysis — it only includes code that is provably reachable.
+
+### Reflection
+
+Classes accessed via reflection must be registered. Quarkus handles most registrations automatically via its extensions. For custom code, use `@RegisterForReflection`:
+
+```java
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
+@RegisterForReflection
+public class MyDto {
+    // fields, getters, setters
+}
+```
+
+Or configure it in `application.properties`:
+
+```properties
+quarkus.native.additional-build-args=--initialize-at-build-time=com.example.MyClass
+```
+
+### Resources
+
+Static resources included in the native binary must be declared:
+
+```properties
+quarkus.native.resources.includes=config/*.json,version.txt
+quarkus.native.resources.excludes=**/*.xml
+```
+
+### Serialization
+
+Classes used with Java serialization need to be registered explicitly. Prefer JSON or other explicit serialization formats for native-compatible applications.
+
+### Additional build arguments
+
+Pass extra flags to `native-image` using:
+
+```properties
+quarkus.native.additional-build-args=--verbose,-H:+ReportExceptionStackTraces
+```
+
+For command-line-only overrides:
+
+```bash
+./mvnw package -Dnative -Dquarkus.native.additional-build-args-append=--verbose
+```
+
+## Testing native executables
+
+Use `@QuarkusIntegrationTest` to run your test suite against the compiled native binary:
+
+```java
+import io.quarkus.test.junit.QuarkusIntegrationTest;
+import org.junit.jupiter.api.Test;
+
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.CoreMatchers.is;
+
+@QuarkusIntegrationTest
+public class GreetingResourceIT {
+
+    @Test
+    public void testHelloEndpoint() {
+        given()
+            .when().get("/hello")
+            .then()
+            .statusCode(200)
+            .body(is("Hello from Quarkus REST"));
+    }
+}
+```
+
+Run the integration tests:
+
+```bash
+./mvnw verify -Dnative
+```
+
+<Warning>
+`@NativeImageTest` is deprecated. Use `@QuarkusIntegrationTest` instead — it provides a superset of the testing capabilities.
+</Warning>
+
+By default, Quarkus waits 60 seconds for the native binary to start before failing. Increase the timeout for slow machines:
+
+```bash
+./mvnw verify -Dnative -Dquarkus.test.wait-time=300
+```
+
+## Common issues and tips
+
+<AccordionGroup>
+  <Accordion title="macOS 'cannot be opened because the developer cannot be verified'">
+    GraalVM binaries are not notarized for macOS. Remove the quarantine attribute recursively:
+
+    ```bash
+    xattr -r -d com.apple.quarantine ${GRAALVM_HOME}/../..
+    ```
+  </Accordion>
+  <Accordion title="Windows: packaging fails immediately">
+    The Microsoft Native Tools for Visual Studio must be initialized first. Open the **x64 Native Tools Command Prompt** from the Start menu, navigate to your project, then run:
+
+    ```bash
+    ./mvnw package -Dnative
+    ```
+  </Accordion>
+  <Accordion title="ClassNotFoundException at runtime in native mode">
+    The class is not being reached by GraalVM's static analysis. Annotate it with `@RegisterForReflection` or add it to the reflection configuration. Check the build log for "Unresolved element" warnings.
+  </Accordion>
+  <Accordion title="Build is too slow in CI">
+    Use `quarkus.native.container-build=true` with a cached container image. Alternatively, reuse an existing native image with `-Dquarkus.native.reuse-existing=true` if the source has not changed.
+  </Accordion>
+  <Accordion title="Fully static executables (experimental)">
+    On Linux you can build a binary with no shared library dependencies by linking against musl libc:
+
+    ```bash
+    ./mvnw package -Dnative \
+      -Dquarkus.native.additional-build-args="--static","--libc=musl"
+    ```
+
+    Do not use fully static binaries in production without thorough testing.
+  </Accordion>
+</AccordionGroup>

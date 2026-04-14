@@ -1,0 +1,127 @@
+---
+title: "What is Quarkus? Cloud Native Java Framework"
+description: "Quarkus is a Kubernetes-native Java framework that processes annotations at build time for fast startup, low memory, and GraalVM native compilation."
+---
+
+Quarkus is a Cloud Native, Container First framework for writing Java applications. Unlike traditional Java frameworks that do most of their work at runtime, Quarkus moves as much processing as possible to build time — scanning annotations, validating configuration, generating bytecode, and wiring beans together before your application ever starts. The result is dramatically faster startup times, lower memory consumption, and a smaller attack surface, all while letting you write familiar code backed by Jakarta EE, MicroProfile, Hibernate, and Eclipse Vert.x.
+
+## Why Quarkus exists
+
+Traditional Java frameworks were designed for long-running server deployments where a slow, memory-hungry startup was an acceptable cost. Container-based and serverless workloads changed that calculus. When a new container instance needs to be ready in milliseconds, or when you are paying per invocation, a JVM that takes several seconds to warm up is a liability.
+
+Quarkus was created to close the gap between Java and the languages that had become dominant in cloud-native development. It does this through three core ideas:
+
+- **Build-time processing** — the framework indexes your code with [Jandex](https://github.com/smallrye/jandex), processes CDI beans, resolves configuration, and generates reflection-free bytecode at build time rather than startup.
+- **Ahead-of-time native compilation** — using GraalVM's `native-image` tool, Quarkus applications can be compiled to standalone native executables with near-instant startup and a fraction of the JVM's memory footprint.
+- **Unified reactive and imperative model** — the same application can mix blocking JAX-RS endpoints with non-blocking reactive endpoints, letting you choose the right model per use case without switching frameworks.
+
+## Extensions
+
+Quarkus functionality is delivered through extensions. An extension is a library that has been optimised for Quarkus' build-time model — it contributes to the build-time processing phase so that at runtime there is less work to do. The extension ecosystem covers databases (Hibernate ORM, Panache, reactive clients), messaging (Kafka, RabbitMQ, Pulsar), security (OIDC, JWT, WebAuthn), observability (OpenTelemetry, Micrometer), and hundreds more.
+
+You add extensions to your project using the Quarkus CLI, Maven, or Gradle:
+
+<CodeGroup>
+
+```bash Quarkus CLI
+quarkus ext add rest hibernate-orm-panache jdbc-postgresql
+```
+
+```bash Maven
+./mvnw quarkus:add-extension -Dextensions='rest,hibernate-orm-panache,jdbc-postgresql'
+```
+
+```bash Gradle
+./gradlew addExtension --extensions='rest,hibernate-orm-panache,jdbc-postgresql'
+```
+
+</CodeGroup>
+
+## Dev Mode
+
+Quarkus ships with a development mode that watches your source tree and recompiles and redeploys changed files while the application is running. You never restart the server manually during development. When you save a file and refresh your browser (or re-send a request), Quarkus detects the change, recompiles only what changed, and reloads the application — typically in under a second.
+
+Dev Mode also provides:
+
+- **Continuous testing** — tests run in the background and results appear in the terminal as you code.
+- **Dev UI** — a browser interface at `http://localhost:8080/q/dev` that shows installed extensions, configuration, CDI beans, database schemas, and more.
+- **Dev Services** — Quarkus automatically starts containerized databases, message brokers, and caches using Testcontainers so you do not need to install or configure them locally.
+
+Start Dev Mode with:
+
+<CodeGroup>
+
+```bash Quarkus CLI
+quarkus dev
+```
+
+```bash Maven
+./mvnw quarkus:dev
+```
+
+```bash Gradle
+./gradlew quarkusDev
+```
+
+</CodeGroup>
+
+## Build-time vs. runtime: what it means in practice
+
+The following diagram shows where work happens in a traditional framework versus Quarkus:
+
+| Phase | Traditional framework | Quarkus |
+|---|---|---|
+| Build | Compile Java sources | Compile + index + process CDI + generate bytecode |
+| Startup | Scan classpath, wire beans, validate config | Load pre-built metadata, start I/O |
+| Runtime | Reflection-heavy dispatch | Mostly reflection-free, pre-generated code |
+
+Because Quarkus has already done the heavy lifting before the JVM starts, the startup sequence is short. Native executables push this even further by eliminating the JVM entirely.
+
+## JVM and native modes
+
+Every Quarkus application can run in two modes:
+
+<Tabs>
+  <Tab title="JVM mode">
+    The application runs on a standard JDK (HotSpot or OpenJ9). You get full Java compatibility, JIT compilation benefits for long-running services, and fast build cycles. This is the default during development.
+
+    ```bash
+    java -jar target/quarkus-app/quarkus-run.jar
+    ```
+  </Tab>
+  <Tab title="Native mode">
+    GraalVM compiles the application to a standalone native executable. Startup is measured in milliseconds and RSS memory is a fraction of the JVM equivalent. Build times are longer (several minutes), so native builds are best suited for CI/CD pipelines.
+
+    ```bash
+    ./mvnw package -Dnative
+    ./target/my-app-runner
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+  Most Quarkus guides, including the getting-started guides, apply to both JVM and native modes unless otherwise stated. GraalVM is only required when building native executables.
+</Note>
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Create your first application" icon="rocket" href="/getting-started">
+    Step-by-step guide to bootstrapping a Hello World REST app with Dev Mode, injection, tests, and packaging.
+  </Card>
+  <Card title="Build a reactive application" icon="bolt" href="/getting-started-reactive">
+    Use Mutiny, Hibernate Reactive, and non-blocking I/O to build a reactive CRUD API.
+  </Card>
+  <Card title="Dev Services" icon="server" href="/getting-started-dev-services">
+    Let Quarkus automatically provision a PostgreSQL container so you can focus on code, not infrastructure.
+  </Card>
+  <Card title="CDI and dependency injection" icon="syringe" href="/cdi">
+    Learn how Quarkus's ArC container manages beans, scopes, interceptors, and events.
+  </Card>
+  <Card title="REST endpoints" icon="plug" href="/rest">
+    Build JAX-RS REST endpoints with Quarkus REST (formerly RESTEasy Reactive) and Jackson.
+  </Card>
+  <Card title="Building a native executable" icon="microchip" href="/building-native-image">
+    Compile your Quarkus app with GraalVM for near-instant startup and minimal memory use.
+  </Card>
+</CardGroup>

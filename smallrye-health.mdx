@@ -1,0 +1,228 @@
+---
+title: "Health Checks with SmallRye Health"
+description: "Add liveness, readiness, and startup health check endpoints to Quarkus applications using SmallRye Health for Kubernetes and load-balancer integration."
+keywords: ["health checks", "liveness", "readiness", "startup", "SmallRye Health", "MicroProfile Health", "Kubernetes probes", "quarkus-smallrye-health"]
+---
+
+The `quarkus-smallrye-health` extension implements the [MicroProfile Health](https://github.com/eclipse/microprofile-health) specification. It exposes HTTP endpoints that report whether your application is alive, ready to handle traffic, and fully started—exactly the information that Kubernetes, load balancers, and orchestration platforms need to manage your service automatically.
+
+## Add the extension
+
+<Tabs>
+  <Tab title="Maven">
+    ```xml
+    <dependency>
+        <groupId>io.quarkus</groupId>
+        <artifactId>quarkus-smallrye-health</artifactId>
+    </dependency>
+    ```
+  </Tab>
+  <Tab title="Gradle">
+    ```groovy
+    implementation("io.quarkus:quarkus-smallrye-health")
+    ```
+  </Tab>
+  <Tab title="Quarkus CLI">
+    ```bash
+    quarkus extension add smallrye-health
+    ```
+  </Tab>
+</Tabs>
+
+## Health endpoints
+
+Once the extension is on the classpath, four endpoints are available immediately:
+
+| Endpoint | Purpose |
+|---|---|
+| `/q/health/live` | Liveness — is the application process running? |
+| `/q/health/ready` | Readiness — can the application serve requests right now? |
+| `/q/health/started` | Startup — has the application finished initialization? |
+| `/q/health` | Combined — all registered health checks in one response |
+
+Every endpoint returns a JSON object:
+
+```json
+{
+    "status": "UP",
+    "checks": [
+        {
+            "name": "Database connection",
+            "status": "UP",
+            "data": {
+                "pool-size": 10
+            }
+        }
+    ]
+}
+```
+
+The top-level `status` is `UP` when all checks pass and `DOWN` if any single check fails. The HTTP response code is `200` for `UP` and `503` for `DOWN`.
+
+<Note>
+By default, health endpoints are exposed on the main HTTP server. You can move them to a dedicated management port by setting `quarkus.management.enabled=true`. See the management interface reference for details.
+</Note>
+
+## Built-in health checks
+
+Many Quarkus extensions register their own health checks automatically when `quarkus-smallrye-health` is present:
+
+| Extension | What it checks |
+|---|---|
+| `quarkus-agroal` (datasource) | Database connection pool connectivity |
+| `quarkus-reactive-pg-client` | PostgreSQL reactive client connectivity |
+| `quarkus-reactive-mysql-client` | MySQL reactive client connectivity |
+| `quarkus-smallrye-reactive-messaging-kafka` | Kafka consumer/producer health |
+| `quarkus-redis-client` | Redis connectivity |
+| `quarkus-mongodb-client` | MongoDB connectivity |
+
+You get these checks for free—no code required.
+
+## Custom health checks
+
+Implement the `HealthCheck` interface and annotate your class with one of the qualifier annotations to register it.
+
+### Liveness check
+
+```java
+package com.example.health;
+
+import org.eclipse.microprofile.health.HealthCheck;
+import org.eclipse.microprofile.health.HealthCheckResponse;
+import org.eclipse.microprofile.health.Liveness;
+import jakarta.enterprise.context.ApplicationScoped;
+
+@Liveness
+@ApplicationScoped
+public class ApplicationLivenessCheck implements HealthCheck {
+
+    @Override
+    public HealthCheckResponse call() {
+        return HealthCheckResponse.up("application-live");
+    }
+}
+```
+
+### Readiness check
+
+```java
+package com.example.health;
+
+import org.eclipse.microprofile.health.HealthCheck;
+import org.eclipse.microprofile.health.HealthCheckResponse;
+import org.eclipse.microprofile.health.HealthCheckResponseBuilder;
+import org.eclipse.microprofile.health.Readiness;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+
+@Readiness
+@ApplicationScoped
+public class ExternalServiceReadinessCheck implements HealthCheck {
+
+    @Inject
+    ExternalServiceClient client;
+
+    @Override
+    public HealthCheckResponse call() {
+        HealthCheckResponseBuilder builder = HealthCheckResponse
+                .named("external-service");
+
+        try {
+            boolean available = client.ping();
+            return available
+                    ? builder.up().withData("url", client.getBaseUrl()).build()
+                    : builder.down().withData("reason", "ping returned false").build();
+        } catch (Exception e) {
+            return builder.down().withData("error", e.getMessage()).build();
+        }
+    }
+}
+```
+
+### Startup check
+
+```java
+package com.example.health;
+
+import org.eclipse.microprofile.health.HealthCheck;
+import org.eclipse.microprofile.health.HealthCheckResponse;
+import org.eclipse.microprofile.health.Startup;
+import jakarta.enterprise.context.ApplicationScoped;
+
+@Startup
+@ApplicationScoped
+public class WarmUpCheck implements HealthCheck {
+
+    private volatile boolean ready = false;
+
+    public void markReady() {
+        this.ready = true;
+    }
+
+    @Override
+    public HealthCheckResponse call() {
+        return ready
+                ? HealthCheckResponse.up("warmup-complete")
+                : HealthCheckResponse.down("warmup-complete");
+    }
+}
+```
+
+### Health check qualifiers
+
+| Annotation | Endpoint |
+|---|---|
+| `@Liveness` | `/q/health/live` |
+| `@Readiness` | `/q/health/ready` |
+| `@Startup` | `/q/health/started` |
+
+<Tip>
+Annotate your health check beans with `@ApplicationScoped` or `@Singleton`. If you omit the scope annotation, Quarkus defaults to `@Singleton` automatically.
+</Tip>
+
+## Kubernetes integration
+
+Use the health endpoints as probe targets in your Kubernetes deployment manifest:
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /q/health/live
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /q/health/ready
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  failureThreshold: 3
+
+startupProbe:
+  httpGet:
+    path: /q/health/started
+    port: 8080
+  failureThreshold: 30
+  periodSeconds: 5
+```
+
+If you use the `quarkus-kubernetes` or `quarkus-openshift` extension, probes are generated automatically from your health check beans—no manual YAML editing needed.
+
+## Configuration
+
+```properties
+# Change the root path for all health endpoints (default: /q/health)
+quarkus.smallrye-health.root-path=/health
+
+# Expose health checks on a dedicated management port
+quarkus.management.enabled=true
+quarkus.management.port=9000
+
+# Include the full stack trace in DOWN responses (disabled by default for security)
+quarkus.smallrye-health.include-all=true
+```
+
+With `quarkus.management.enabled=true`, the health endpoints move to the management port (`9000` by default) and are no longer accessible from the main application port.

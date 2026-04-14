@@ -1,97 +1,103 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "Quarkus: Supersonic Subatomic Java"
+description: "Quarkus is a Cloud Native, Container First Java framework for building fast, lightweight microservices optimized for Kubernetes and GraalVM."
 ---
 
-## Setting up
+Quarkus is the Kubernetes-native Java framework tailored for OpenJDK HotSpot and GraalVM. It delivers lightning-fast startup times and low memory footprint, making it ideal for cloud-native microservices, serverless functions, and container-based workloads. Quarkus unifies imperative and reactive programming models under one framework, backed by the standards you already know — Jakarta EE, MicroProfile, Hibernate, and Eclipse Vert.x.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Get Started" icon="rocket" href="/getting-started">
+    Bootstrap your first Quarkus application and have a running REST endpoint in minutes.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Reactive Development" icon="bolt" href="/getting-started-reactive">
+    Build non-blocking, reactive applications using Mutiny and Vert.x under the hood.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Dev Services" icon="server" href="/getting-started-dev-services">
+    Zero-config containerized databases, brokers, and caches automatically provisioned in dev mode.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="Native Executables" icon="microchip" href="/building-native-image">
+    Compile to GraalVM native and achieve near-instant startup with a tiny memory footprint.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## Why Quarkus?
 
-Everything you need to create world-class documentation.
+Quarkus shifts as much work as possible to build time — annotations are processed, configuration is validated, and bytecode is generated before your app even starts. This means faster startups, lower memory usage, and a smaller attack surface in production.
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
+<CardGroup cols={3}>
+  <Card title="Container First" icon="docker">
+    Minimal footprint Java applications optimal for containers and Kubernetes.
   </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
+  <Card title="Developer Joy" icon="face-smile">
+    Live reload, Dev UI, zero-config Dev Services, and continuous testing built in.
   </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
+  <Card title="Standards Based" icon="certificate">
+    Built on Jakarta EE, MicroProfile, Hibernate, RESTEasy, and Eclipse Vert.x.
   </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+</CardGroup>
 
-## Need inspiration?
+## Get Started in 4 Steps
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+<Steps>
+  <Step title="Install the Quarkus CLI">
+    Install via SDKMAN!, Homebrew, or download directly:
+
+    ```bash
+    sdk install quarkus
+    ```
+  </Step>
+  <Step title="Create a new application">
+    Scaffold a new Quarkus project with the REST extension:
+
+    ```bash
+    quarkus create app org.acme:my-app --extension='rest' && cd my-app
+    ```
+  </Step>
+  <Step title="Start live coding mode">
+    Run in development mode with hot reload enabled:
+
+    ```bash
+    quarkus dev
+    ```
+  </Step>
+  <Step title="Call your first endpoint">
+    Your app is live at `http://localhost:8080`. Test it with:
+
+    ```bash
+    curl http://localhost:8080/hello
+    ```
+  </Step>
+</Steps>
+
+## Explore the Framework
+
+<CardGroup cols={2}>
+  <Card title="CDI & Dependency Injection" icon="syringe" href="/cdi">
+    Learn how Quarkus's ArC CDI container manages beans, scopes, interceptors, and events.
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/config">
+    Inject typed configuration from properties files, environment variables, and config servers.
+  </Card>
+  <Card title="REST Endpoints" icon="plug" href="/rest">
+    Build JAX-RS REST endpoints with RESTEasy Reactive, Jackson serialization, and OpenAPI docs.
+  </Card>
+  <Card title="Data & Panache" icon="database" href="/hibernate-orm-panache">
+    Simplify JPA with Panache's active record and repository patterns for Hibernate ORM.
+  </Card>
+  <Card title="Security & OIDC" icon="lock" href="/security-overview">
+    Secure your app with OIDC, JWT, Basic Auth, WebAuthn, and role-based access control.
+  </Card>
+  <Card title="Messaging & Kafka" icon="envelope" href="/kafka">
+    Connect to Kafka, RabbitMQ, Pulsar, and AMQP with SmallRye Reactive Messaging.
+  </Card>
+  <Card title="Observability" icon="chart-line" href="/observability">
+    Add OpenTelemetry tracing, Micrometer metrics, structured logging, and health checks.
+  </Card>
+  <Card title="Extensions" icon="puzzle-piece" href="/writing-extensions">
+    Build and publish your own Quarkus extension to share framework integrations.
+  </Card>
+</CardGroup>
+
+<Note>
+  Quarkus supports both JVM and native (GraalVM) compilation modes. Most guides apply to both unless otherwise noted.
+</Note>

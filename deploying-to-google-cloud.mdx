@@ -1,0 +1,346 @@
+---
+title: "Running Quarkus on Google Cloud Platform"
+description: "Deploy Quarkus to Google Cloud Run, Google Cloud Functions, or GKE with native image compilation for minimal cold start times on serverless platforms."
+keywords: ["quarkus", "gcp", "google cloud", "cloud run", "cloud functions", "gke", "native", "pubsub", "firestore"]
+---
+
+Google Cloud Platform offers multiple hosting options for Quarkus. **Cloud Run** is the simplest path for containerized workloads and pairs extremely well with Quarkus native images—startup times under 50ms eliminate the cold start penalty that JVM-based containers exhibit on serverless platforms. **Cloud Functions** suits lightweight event-driven handlers, and **GKE** provides full Kubernetes control for complex microservice deployments.
+
+## Prerequisites
+
+- [Google Cloud SDK](https://cloud.google.com/sdk) installed
+- A Google Cloud account and project
+- Docker installed for local container builds
+
+Authenticate before running any `gcloud` commands:
+
+```bash
+gcloud auth login
+```
+
+## Deployment options at a glance
+
+| Option | Best for | Native support |
+|---|---|---|
+| Cloud Run | Containerized HTTP services | Strongly recommended |
+| Cloud Functions | Event-driven / HTTP triggers | Supported |
+| App Engine Standard | JAR-based Java apps | No |
+| App Engine Flexible | Docker-based apps | Yes |
+| GKE | Full Kubernetes workloads | Yes |
+
+## Cloud Run
+
+Cloud Run runs your container image in a fully managed environment. Quarkus defaults to port 8080, which matches the Cloud Run default—no extra configuration is needed.
+
+### Deploy a JVM application
+
+<Steps>
+  <Step title="Package the application">
+    ```bash
+    cp src/main/docker/Dockerfile.jvm Dockerfile
+    ./mvnw clean package
+    ```
+  </Step>
+  <Step title="Create a .gcloudignore file">
+    Exclude source files so Cloud Build only uploads compiled artifacts:
+    ```text .gcloudignore
+    src/
+    ```
+  </Step>
+  <Step title="Build and push the image with Cloud Build">
+    ```bash
+    gcloud builds submit --tag gcr.io/PROJECT-ID/my-app
+    ```
+  </Step>
+  <Step title="Deploy to Cloud Run">
+    ```bash
+    gcloud run deploy --image gcr.io/PROJECT-ID/my-app
+    ```
+    Cloud Run will prompt for the service name, region, and whether unauthenticated access is allowed. When deployment completes, the output shows the service URL.
+  </Step>
+</Steps>
+
+### Deploy a native application
+
+Native images start in tens of milliseconds, which makes them ideal for Cloud Run's scale-to-zero model. The native binary must be compiled for Linux (`x86_64`), which is easiest to guarantee with a container build:
+
+<Steps>
+  <Step title="Compile natively inside a container">
+    ```bash
+    ./mvnw clean package -Dnative -Dquarkus.native.container-build=true
+    ```
+    This runs the GraalVM native compilation inside a Docker container—no local GraalVM installation required.
+  </Step>
+  <Step title="Copy the native Dockerfile">
+    ```bash
+    cp src/main/docker/Dockerfile.native Dockerfile
+    ```
+  </Step>
+  <Step title="Build and push with Cloud Build">
+    ```bash
+    gcloud builds submit --tag gcr.io/PROJECT-ID/my-app-native
+    ```
+  </Step>
+  <Step title="Deploy to Cloud Run">
+    ```bash
+    gcloud run deploy --image gcr.io/PROJECT-ID/my-app-native
+    ```
+  </Step>
+</Steps>
+
+<Tip>
+Cloud Run supports [health checks](https://cloud.google.com/run/docs/configuring/healthchecks). Add `quarkus-smallrye-health` to your project and Cloud Run will use the `/q/health/live` and `/q/health/ready` endpoints automatically.
+</Tip>
+
+## Cloud Functions
+
+Quarkus provides three extensions for Google Cloud Functions:
+
+| Extension | Use case |
+|---|---|
+| `quarkus-google-cloud-functions` | Native Cloud Functions API (background/HTTP functions) |
+| `quarkus-google-cloud-functions-http` | HTTP functions via Quarkus REST, Servlet, or Vert.x Web |
+| `quarkus-funqy-google-cloud-functions` | Funqy-based functions |
+
+### HTTP functions with quarkus-google-cloud-functions-http
+
+This extension wraps your existing Quarkus HTTP endpoints so they run as Cloud Functions without changes to your application code.
+
+<Tabs>
+  <Tab title="Maven">
+    ```xml pom.xml
+    <dependency>
+        <groupId>io.quarkus</groupId>
+        <artifactId>quarkus-google-cloud-functions-http</artifactId>
+    </dependency>
+    ```
+  </Tab>
+  <Tab title="Quarkus CLI">
+    ```bash
+    quarkus extension add google-cloud-functions-http
+    ```
+  </Tab>
+</Tabs>
+
+Build and deploy:
+
+```bash
+./mvnw clean package
+
+gcloud functions deploy my-function \
+  --entry-point=io.quarkus.gcp.functions.http.QuarkusHttpFunction \
+  --runtime=java21 \
+  --trigger-http \
+  --allow-unauthenticated \
+  --source=target/deployment
+```
+
+### Native Cloud Functions
+
+For native executable functions, build with `-Dnative` and use the `--runtime=provided` flag instead:
+
+```bash
+./mvnw clean package -Dnative -Dquarkus.native.container-build=true
+
+gcloud functions deploy my-native-function \
+  --entry-point=io.quarkus.gcp.functions.QuarkusBackgroundFunction \
+  --runtime=provided \
+  --trigger-topic=my-pubsub-topic \
+  --source=target/deployment
+```
+
+## App Engine
+
+### App Engine Standard
+
+App Engine Standard runs your application on a shared Java runtime. Quarkus must be packaged as an uber-JAR:
+
+```properties application.properties
+quarkus.package.jar.type=uber-jar
+```
+
+Create a minimal `app.yaml`:
+
+```yaml src/main/appengine/app.yaml
+runtime: java21
+```
+
+Build and deploy:
+
+```bash
+# Build locally and deploy the JAR
+./mvnw clean package
+gcloud app deploy target/my-app-runner.jar
+
+# Or let gcloud handle the build
+gcloud app deploy
+```
+
+### App Engine Flexible (Docker)
+
+App Engine Flexible runs Docker containers and supports both JVM and native Quarkus images. Add a minimal `app.yaml` at the project root:
+
+```yaml app.yaml
+runtime: custom
+env: flex
+```
+
+Then copy a Dockerfile and deploy:
+
+```bash
+# JVM
+cp src/main/docker/Dockerfile.jvm Dockerfile
+./mvnw clean package
+gcloud app deploy
+
+# Native
+cp src/main/docker/Dockerfile.native Dockerfile
+./mvnw clean package -Dnative
+gcloud app deploy
+```
+
+<Note>
+App Engine Flexible supports [health checks](https://cloud.google.com/appengine/docs/flexible/reference/app-yaml?tab=java#updated_health_checks). Add `quarkus-smallrye-health` to expose the required endpoints.
+</Note>
+
+## GKE
+
+For workloads that need full Kubernetes capabilities, deploy to Google Kubernetes Engine using the Quarkus Kubernetes extension. GKE clusters are fully compatible with standard `kubectl` and the `quarkus-kubernetes` extension:
+
+```bash
+# Authenticate kubectl with the cluster
+gcloud container clusters get-credentials my-cluster --region us-central1
+
+# Build, push, and deploy
+./mvnw clean package \
+  -Dquarkus.container-image.build=true \
+  -Dquarkus.container-image.push=true \
+  -Dquarkus.container-image.registry=gcr.io \
+  -Dquarkus.container-image.group=PROJECT-ID \
+  -Dquarkus.kubernetes.deploy=true
+```
+
+See the [Kubernetes deployment guide](/deploying-to-kubernetes) for full configuration options including health probes, resource limits, and ConfigMap injection.
+
+## GCP service integrations
+
+The [Quarkiverse GCP extensions](https://github.com/quarkiverse/quarkus-google-cloud-services) provide Quarkus-native clients for GCP services:
+
+| Service | Extension artifact |
+|---|---|
+| Pub/Sub | `quarkus-google-cloud-pubsub` |
+| Firestore | `quarkus-google-cloud-firestore` |
+| Cloud Storage | `quarkus-google-cloud-storage` |
+| Cloud Spanner | `quarkus-google-cloud-spanner` |
+| BigQuery | `quarkus-google-cloud-bigquery` |
+| Secret Manager | `quarkus-google-cloud-secret-manager` |
+
+### Example: Pub/Sub
+
+```xml pom.xml
+<dependency>
+    <groupId>io.quarkiverse.googlecloudservices</groupId>
+    <artifactId>quarkus-google-cloud-pubsub</artifactId>
+</dependency>
+```
+
+```properties application.properties
+quarkus.google.cloud.project-id=my-gcp-project
+```
+
+```java
+@Inject
+Publisher publisher;
+
+public void publish(String message) throws Exception {
+    PubsubMessage pubsubMessage = PubsubMessage.newBuilder()
+        .setData(ByteString.copyFromUtf8(message))
+        .build();
+    publisher.publish(pubsubMessage).get();
+}
+```
+
+### Example: Cloud SQL
+
+Cloud SQL provides managed MySQL, PostgreSQL, and SQL Server instances. Add the JDBC extension and the Cloud SQL socket factory:
+
+```xml pom.xml
+<dependency>
+    <groupId>io.quarkus</groupId>
+    <artifactId>quarkus-jdbc-postgresql</artifactId>
+</dependency>
+<dependency>
+    <groupId>com.google.cloud.sql</groupId>
+    <artifactId>postgres-socket-factory</artifactId>
+    <version>1.17.0</version>
+</dependency>
+```
+
+```properties application.properties
+quarkus.datasource.db-kind=postgresql
+# Do not include the hostname—the socket factory handles the connection
+quarkus.datasource.jdbc.url=jdbc:postgresql:///my-database
+quarkus.datasource.username=my-user
+quarkus.datasource.password=my-password
+quarkus.datasource.jdbc.additional-jdbc-properties.cloudSqlInstance=project-id:us-central1:my-instance
+quarkus.datasource.jdbc.additional-jdbc-properties.socketFactory=com.google.cloud.sql.postgres.SocketFactory
+```
+
+When generating a native executable, mark the JNI finalizer class as runtime-initialized:
+
+```properties application.properties
+quarkus.native.additional-build-args=--initialize-at-run-time=jnr.ffi.provider.jffi.NativeFinalizer$SingletonHolder\,com.kenai.jffi.internal.Cleaner
+```
+
+### Example: Secret Manager
+
+```xml pom.xml
+<dependency>
+    <groupId>io.quarkiverse.googlecloudservices</groupId>
+    <artifactId>quarkus-google-cloud-secret-manager</artifactId>
+</dependency>
+```
+
+```java
+@Inject
+SecretManagerServiceClient secretManagerClient;
+
+public String getSecret(String projectId, String secretId) {
+    SecretVersionName name = SecretVersionName.of(projectId, secretId, "latest");
+    AccessSecretVersionResponse response = secretManagerClient.accessSecretVersion(name);
+    return response.getPayload().getData().toStringUtf8();
+}
+```
+
+## Deploying with the gcloud CLI
+
+A reference of the most common `gcloud` commands used throughout this guide:
+
+```bash
+# Authenticate
+gcloud auth login
+gcloud config set project PROJECT-ID
+
+# Cloud Run
+gcloud builds submit --tag gcr.io/PROJECT-ID/my-app
+gcloud run deploy my-service --image gcr.io/PROJECT-ID/my-app --region us-central1
+
+# Cloud Functions
+gcloud functions deploy my-function \
+  --runtime=java21 \
+  --trigger-http \
+  --entry-point=io.quarkus.gcp.functions.http.QuarkusHttpFunction \
+  --source=target/deployment
+
+# App Engine
+gcloud app deploy
+
+# List deployed services
+gcloud run services list
+gcloud functions list
+gcloud app versions list
+```
+
+<Tip>
+For production deployments, use a [Workload Identity](https://cloud.google.com/kubernetes-engine/docs/how-to/workload-identity) on GKE or the default service account on Cloud Run instead of user credentials. This avoids managing service account key files.
+</Tip>

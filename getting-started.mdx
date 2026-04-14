@@ -1,0 +1,385 @@
+---
+title: "Create Your First Quarkus Application"
+description: "Bootstrap a Hello World REST app with Quarkus, add dependency injection, write tests with RestAssured, and package the application for deployment."
+---
+
+This guide walks you through creating a simple Quarkus application that exposes a `/hello` REST endpoint. Along the way you will see how Quarkus bootstraps a project, how CDI dependency injection works, how to run the application in Dev Mode with live reload, how to write and run tests, and how to produce a runnable JAR.
+
+## Prerequisites
+
+- JDK 17 or later installed (verify with `java -version`)
+- Apache Maven 3.9.9+ or Gradle 8.x
+- Optionally, the [Quarkus CLI](/tooling) for the most convenient workflow
+
+<Tip>
+  If you have multiple JDKs installed, Maven may not use the one you expect. Run `mvn --version` to confirm which Java Maven is using.
+</Tip>
+
+## Architecture
+
+The application you are building serves a `hello` endpoint. To demonstrate dependency injection, the endpoint delegates its greeting logic to a `GreetingService` bean. You will also write a test that exercises the endpoint through the HTTP layer.
+
+## Bootstrap the project
+
+The fastest way to create a new Quarkus project is with the Quarkus CLI or Maven. Both approaches generate the same project structure.
+
+<Steps>
+  <Step title="Create the project">
+    <CodeGroup>
+
+    ```bash Quarkus CLI
+    quarkus create app org.acme:getting-started \
+        --extension='rest' \
+        --no-code
+    cd getting-started
+    ```
+
+    ```bash Maven
+    mvn io.quarkus.platform:quarkus-maven-plugin:3.17.5:create \
+        -DprojectGroupId=org.acme \
+        -DprojectArtifactId=getting-started \
+        -Dextensions='rest'
+    cd getting-started
+    ```
+
+    ```bash Gradle
+    mvn io.quarkus.platform:quarkus-maven-plugin:3.17.5:create \
+        -DprojectGroupId=org.acme \
+        -DprojectArtifactId=getting-started \
+        -Dextensions='rest' \
+        -DbuildTool=gradle
+    cd getting-started
+    ```
+
+    </CodeGroup>
+
+    The generator creates:
+
+    - The Maven or Gradle project structure
+    - An `org.acme.GreetingResource` resource exposed on `/hello`
+    - An associated unit test
+    - A landing page accessible at `http://localhost:8080` after start
+    - Example `Dockerfile` files for both native and JVM modes in `src/main/docker`
+    - The application configuration file at `src/main/resources/application.properties`
+  </Step>
+
+  <Step title="Inspect the build file">
+    Open `pom.xml`. The key pieces are the Quarkus BOM import — which lets you omit version numbers for all Quarkus dependencies — and the `quarkus-maven-plugin`, which handles packaging and provides Dev Mode:
+
+    ```xml pom.xml
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>${quarkus.platform.group-id}</groupId>
+                <artifactId>${quarkus.platform.artifact-id}</artifactId>
+                <version>${quarkus.platform.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>${quarkus.platform.group-id}</groupId>
+                <artifactId>quarkus-maven-plugin</artifactId>
+                <version>${quarkus.platform.version}</version>
+                <extensions>true</extensions>
+            </plugin>
+        </plugins>
+    </build>
+    ```
+
+    The REST extension dependency is declared without an explicit version because the BOM manages it:
+
+    <CodeGroup>
+
+    ```xml pom.xml
+    <dependency>
+        <groupId>io.quarkus</groupId>
+        <artifactId>quarkus-rest</artifactId>
+    </dependency>
+    ```
+
+    ```groovy build.gradle
+    implementation("io.quarkus:quarkus-rest")
+    ```
+
+    </CodeGroup>
+  </Step>
+</Steps>
+
+## The Jakarta REST resource
+
+The project generator creates `src/main/java/org/acme/GreetingResource.java` with a simple REST endpoint:
+
+```java src/main/java/org/acme/GreetingResource.java
+package org.acme;
+
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.core.MediaType;
+
+@Path("/hello")
+public class GreetingResource {
+
+    @GET
+    @Produces(MediaType.TEXT_PLAIN)
+    public String hello() {
+        return "Hello from Quarkus REST";
+    }
+}
+```
+
+<Note>
+  In Quarkus, you do not need to create an `Application` class — it is supported but not required. Additionally, only one instance of the resource is created (not one per request). You can change the scope using `@ApplicationScoped`, `@RequestScoped`, or other CDI scope annotations.
+</Note>
+
+## Run the application in Dev Mode
+
+Start the application with live reload enabled:
+
+<CodeGroup>
+
+```bash Quarkus CLI
+quarkus dev
+```
+
+```bash Maven
+./mvnw quarkus:dev
+```
+
+```bash Gradle
+./gradlew quarkusDev
+```
+
+</CodeGroup>
+
+Once started, call the endpoint:
+
+```bash
+curl -w "\n" http://localhost:8080/hello
+Hello from Quarkus REST
+```
+
+Dev Mode watches your source files. Any changes you save are automatically compiled and redeployed — you do not need to restart. Press `CTRL+C` to stop.
+
+<Tip>
+  Dev Mode also listens for a debugger on port `5005`. Pass `-Dsuspend` to wait for the debugger before starting, or `-Ddebug=false` to disable remote debugging entirely.
+</Tip>
+
+## Add dependency injection
+
+Quarkus uses ArC, a CDI-based dependency injection solution optimized for Quarkus' build-time model. Let's extract the greeting logic into a dedicated bean.
+
+<Steps>
+  <Step title="Create the GreetingService bean">
+    Create `src/main/java/org/acme/GreetingService.java`:
+
+    ```java src/main/java/org/acme/GreetingService.java
+    package org.acme;
+
+    import jakarta.enterprise.context.ApplicationScoped;
+
+    @ApplicationScoped
+    public class GreetingService {
+
+        public String greeting(String name) {
+            return "hello " + name;
+        }
+
+    }
+    ```
+  </Step>
+
+  <Step title="Inject the service into the resource">
+    Update `GreetingResource` to inject `GreetingService` and add a new endpoint:
+
+    ```java src/main/java/org/acme/GreetingResource.java
+    package org.acme;
+
+    import jakarta.inject.Inject;
+    import jakarta.ws.rs.GET;
+    import jakarta.ws.rs.Path;
+    import jakarta.ws.rs.Produces;
+    import jakarta.ws.rs.core.MediaType;
+
+    @Path("/hello")
+    public class GreetingResource {
+
+        @Inject
+        GreetingService service;
+
+        @GET
+        @Produces(MediaType.TEXT_PLAIN)
+        @Path("/greeting/{name}")
+        public String greeting(String name) {
+            return service.greeting(name);
+        }
+
+        @GET
+        @Produces(MediaType.TEXT_PLAIN)
+        public String hello() {
+            return "Hello from Quarkus REST";
+        }
+    }
+    ```
+  </Step>
+
+  <Step title="Verify the new endpoint">
+    Because Dev Mode is still running, the changes are already live:
+
+    ```bash
+    curl -w "\n" http://localhost:8080/hello/greeting/quarkus
+    hello quarkus
+    ```
+  </Step>
+</Steps>
+
+## Testing
+
+Quarkus supports JUnit 5. The generated project includes two test dependencies:
+
+<CodeGroup>
+
+```xml pom.xml
+<dependency>
+    <groupId>io.quarkus</groupId>
+    <artifactId>quarkus-junit</artifactId>
+    <scope>test</scope>
+</dependency>
+<dependency>
+    <groupId>io.rest-assured</groupId>
+    <artifactId>rest-assured</artifactId>
+    <scope>test</scope>
+</dependency>
+```
+
+```groovy build.gradle
+testImplementation("io.quarkus:quarkus-junit")
+testImplementation("io.rest-assured:rest-assured")
+```
+
+</CodeGroup>
+
+Edit `src/test/java/org/acme/GreetingResourceTest.java` to test both endpoints:
+
+```java src/test/java/org/acme/GreetingResourceTest.java
+package org.acme;
+
+import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.Test;
+
+import java.util.UUID;
+
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.CoreMatchers.is;
+
+@QuarkusTest
+public class GreetingResourceTest {
+
+    @Test
+    public void testHelloEndpoint() {
+        given()
+          .when().get("/hello")
+          .then()
+             .statusCode(200)
+             .body(is("Hello from Quarkus REST"));
+    }
+
+    @Test
+    public void testGreetingEndpoint() {
+        String uuid = UUID.randomUUID().toString();
+        given()
+          .pathParam("name", uuid)
+          .when().get("/hello/greeting/{name}")
+          .then()
+            .statusCode(200)
+            .body(is("hello " + uuid));
+    }
+
+}
+```
+
+The `@QuarkusTest` annotation instructs JUnit to start the Quarkus application before running the tests. Tests run on port `8081` by default to avoid conflicting with a running Dev Mode instance.
+
+Run the tests:
+
+<CodeGroup>
+
+```bash Maven
+./mvnw test
+```
+
+```bash Gradle
+./gradlew test
+```
+
+</CodeGroup>
+
+<Note>
+  If you want to inject the test URL directly into a test field, use `@TestHTTPResource`. The field can be of type `String`, `URL`, or `URI`. Control the test port with the `quarkus.http.test-port` configuration property.
+</Note>
+
+## Package the application
+
+Stop Dev Mode first (`CTRL+C`), then build:
+
+<CodeGroup>
+
+```bash Maven
+./mvnw package
+```
+
+```bash Gradle
+./gradlew build
+```
+
+</CodeGroup>
+
+The build produces two outputs in `target/`:
+
+- `getting-started-1.0.0-SNAPSHOT.jar` — the standard Maven artifact (not runnable on its own)
+- `quarkus-app/quarkus-run.jar` — the runnable jar, with dependencies in `quarkus-app/lib/`
+
+Run the packaged application:
+
+```bash
+java -jar target/quarkus-app/quarkus-run.jar
+```
+
+<Warning>
+  The `quarkus-app/quarkus-run.jar` is not an über-jar. When deploying (for example, into a container), you must include the entire `quarkus-app/` directory, not just the jar file.
+</Warning>
+
+## Non-application endpoints
+
+Several Quarkus extensions contribute management endpoints under the `/q` prefix:
+
+| Endpoint | Extension |
+|---|---|
+| `/q/health` | SmallRye Health |
+| `/q/metrics` | Micrometer |
+| `/q/openapi` | SmallRye OpenAPI |
+| `/q/info` | Quarkus Info |
+
+These can optionally be exposed on a dedicated management port to limit their visibility in production.
+
+## What's next
+
+<CardGroup cols={2}>
+  <Card title="Dev Services" icon="server" href="/getting-started-dev-services">
+    Build your second Quarkus application using zero-config Dev Services and Hibernate ORM with Panache.
+  </Card>
+  <Card title="Reactive development" icon="bolt" href="/getting-started-reactive">
+    Learn how to build a reactive CRUD API using Mutiny and Hibernate Reactive.
+  </Card>
+  <Card title="Building a native executable" icon="microchip" href="/building-native-image">
+    Compile your application with GraalVM for near-instant startup.
+  </Card>
+  <Card title="CDI and dependency injection" icon="syringe" href="/cdi">
+    Go deeper into beans, scopes, interceptors, and CDI events.
+  </Card>
+</CardGroup>

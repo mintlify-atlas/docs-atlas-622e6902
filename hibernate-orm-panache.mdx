@@ -1,0 +1,364 @@
+---
+title: "Simplified ORM with Hibernate Panache"
+description: "Use Panache to simplify JPA entity definitions and queries with active record and repository patterns, pagination, and built-in CRUD operations."
+---
+
+Hibernate ORM is the de facto Jakarta Persistence implementation and gives you the full power of an Object Relational Mapper. It handles complex mappings well but historically made simple, common mappings more verbose than they need to be. Hibernate ORM with Panache changes that by letting your entities and repositories express intent rather than boilerplate. Fields are public, the ID is inherited, and static query methods live right on the entity class — so the code you write maps closely to what you actually mean.
+
+## Setup
+
+Add the Panache extension and a JDBC driver extension to your build file:
+
+<CodeGroup>
+
+```xml pom.xml
+<dependency>
+    <groupId>io.quarkus</groupId>
+    <artifactId>quarkus-hibernate-orm-panache</artifactId>
+</dependency>
+<dependency>
+    <groupId>io.quarkus</groupId>
+    <artifactId>quarkus-jdbc-postgresql</artifactId>
+</dependency>
+```
+
+```gradle build.gradle
+implementation("io.quarkus:quarkus-hibernate-orm-panache")
+implementation("io.quarkus:quarkus-jdbc-postgresql")
+```
+
+</CodeGroup>
+
+Then configure the datasource and schema strategy in `application.properties`:
+
+```properties application.properties
+quarkus.datasource.db-kind=postgresql
+quarkus.datasource.username=sarah
+quarkus.datasource.password=connor
+quarkus.datasource.jdbc.url=jdbc:postgresql://localhost:5432/mydatabase
+
+# drop and recreate schema on startup (use update in production)
+quarkus.hibernate-orm.schema-management.strategy=drop-and-create
+```
+
+## Active Record vs Repository
+
+Panache supports two patterns. Choose the one that fits your team's style:
+
+<Tabs>
+  <Tab title="Active Record pattern">
+    The active record pattern places query logic directly on the entity class. Extend `PanacheEntity` to get a managed `id` field and all built-in operations as static methods.
+
+    ### Defining the entity
+
+    ```java Person.java
+    package org.acme;
+
+    import java.time.LocalDate;
+    import jakarta.persistence.Entity;
+    import io.quarkus.hibernate.orm.panache.PanacheEntity;
+
+    @Entity
+    public class Person extends PanacheEntity {
+        public String name;
+        public LocalDate birth;
+        public Status status;
+
+        // custom queries live on the entity itself
+        public static Person findByName(String name) {
+            return find("name", name).firstResult();
+        }
+
+        public static List<Person> findAlive() {
+            return list("status", Status.Alive);
+        }
+
+        public static void deleteByName(String name) {
+            delete("name", name);
+        }
+    }
+    ```
+
+    Public fields are the recommended style. Quarkus rewrites field accesses at build time so that custom getters/setters are still respected when you add them. Annotate a field with `@Transient` to exclude it from persistence.
+
+    ### CRUD operations
+
+    ```java
+    import java.time.LocalDate;
+    import java.time.Month;
+    import java.util.List;
+    import java.util.Optional;
+
+    // create and persist
+    Person person = new Person();
+    person.name = "Stef";
+    person.birth = LocalDate.of(1910, Month.FEBRUARY, 1);
+    person.status = Status.Alive;
+    person.persist();
+
+    // modifications after persist are flushed automatically on commit
+    person.name = "Stefan";
+
+    // check persistence state, then delete
+    if (person.isPersistent()) {
+        person.delete();
+    }
+
+    // list all
+    List<Person> everyone = Person.listAll();
+
+    // find by primary key
+    Person found = Person.findById(1L);
+
+    // find by primary key as Optional
+    Optional<Person> maybe = Person.findByIdOptional(1L);
+
+    // count
+    long total = Person.count();
+    long alive  = Person.count("status", Status.Alive);
+
+    // bulk delete
+    Person.delete("status", Status.Alive);
+    Person.deleteAll();
+
+    // bulk update (HQL fragment)
+    Person.update("name = 'Mortal' where status = ?1", Status.Alive);
+    ```
+  </Tab>
+  <Tab title="Repository pattern">
+    The repository pattern keeps query logic in a dedicated class. Your entity is a plain Jakarta Persistence entity; the repository implements `PanacheRepository<T>` and gains the same set of built-in operations.
+
+    ### Defining the entity
+
+    ```java Person.java
+    package org.acme;
+
+    import jakarta.persistence.Entity;
+    import jakarta.persistence.GeneratedValue;
+    import jakarta.persistence.Id;
+    import java.time.LocalDate;
+
+    @Entity
+    public class Person {
+        @Id @GeneratedValue
+        private Long id;
+        private String name;
+        private LocalDate birth;
+        private Status status;
+
+        // getters and setters omitted for brevity
+    }
+    ```
+
+    <Tip>
+    Extend `PanacheEntityBase` instead of writing boilerplate getters/setters — Quarkus generates accessors for you. You can also extend `PanacheEntity` to inherit a default auto-generated `id`.
+    </Tip>
+
+    ### Defining the repository
+
+    ```java PersonRepository.java
+    package org.acme;
+
+    import io.quarkus.hibernate.orm.panache.PanacheRepository;
+    import jakarta.enterprise.context.ApplicationScoped;
+    import java.util.List;
+
+    @ApplicationScoped
+    public class PersonRepository implements PanacheRepository<Person> {
+
+        public Person findByName(String name) {
+            return find("name", name).firstResult();
+        }
+
+        public List<Person> findAlive() {
+            return list("status", Status.Alive);
+        }
+
+        public void deleteByName(String name) {
+            delete("name", name);
+        }
+    }
+    ```
+
+    ### CRUD operations via the repository
+
+    ```java
+    @Inject
+    PersonRepository personRepository;
+
+    // create and persist
+    Person person = new Person();
+    person.setName("Stef");
+    person.setBirth(LocalDate.of(1910, Month.FEBRUARY, 1));
+    person.setStatus(Status.Alive);
+    personRepository.persist(person);
+
+    // list all
+    List<Person> everyone = personRepository.listAll();
+
+    // find by primary key
+    Person found = personRepository.findById(1L);
+
+    // count
+    long total = personRepository.count();
+
+    // bulk delete
+    personRepository.delete("status", Status.Alive);
+    personRepository.deleteAll();
+
+    // bulk update
+    personRepository.update("name = 'Mortal' where status = ?1", Status.Alive);
+    ```
+  </Tab>
+</Tabs>
+
+## Queries
+
+Panache accepts several convenient query forms that expand into full HQL automatically.
+
+### Shorthand query syntax
+
+```java
+// "name" expands to "from Person where name = ?1"
+Person p = Person.find("name", "Stef").firstResult();
+
+// positional parameter
+List<Person> results = Person.list("name = ?1 and status = ?2", "Stef", Status.Alive);
+
+// named parameter
+List<Person> results = Person.list("name = :name", Map.of("name", "Stef"));
+
+// full HQL when you need it
+List<Order> orders = Order.find(
+    "select distinct o from Order o left join fetch o.lineItems"
+);
+```
+
+### Named queries
+
+Define `@NamedQuery` on the entity and reference it with a `#` prefix:
+
+```java Person.java
+@Entity
+@NamedQuery(name = "Person.getByName", query = "from Person where name = ?1")
+public class Person extends PanacheEntity {
+    public String name;
+    public Status status;
+
+    public static Person findByName(String name) {
+        return find("#Person.getByName", name).firstResult();
+    }
+}
+```
+
+## Pagination
+
+For large tables, use `find()` to obtain a `PanacheQuery` and then apply pages:
+
+```java
+import io.quarkus.hibernate.orm.panache.PanacheQuery;
+import io.quarkus.panache.common.Page;
+
+// create a query — no results fetched yet
+PanacheQuery<Person> query = Person.find("status", Status.Alive);
+
+// set page size and fetch the first page
+List<Person> page1 = query.page(Page.ofSize(25)).list();
+
+// advance to the next page
+List<Person> page2 = query.nextPage().list();
+
+// jump to an arbitrary page (0-indexed)
+List<Person> page7 = query.page(Page.of(7, 25)).list();
+
+// total page count and total entity count
+int  pageCount   = query.pageCount();
+long entityCount = query.count();
+```
+
+Prefer `find()` + paging over `list()` / `stream()` for tables that can grow large.
+
+## Sorting
+
+Pass a `Sort` object alongside your query to order results without embedding order clauses in query strings:
+
+```java
+import io.quarkus.panache.common.Sort;
+
+// sort by a single column ascending
+List<Person> byName = Person.list(Sort.by("name"));
+
+// sort by multiple columns
+List<Person> byNameAndBirth = Person.list(Sort.by("name").and("birth"));
+
+// combine a filter with a sort
+List<Person> aliveByName = Person.list(
+    "status", Sort.by("name"), Status.Alive
+);
+
+// control null handling
+List<Person> nullsFirst = Person.list(
+    Sort.by("birth", Sort.NullPrecedence.NULLS_FIRST)
+);
+```
+
+## REST resource example with `@Transactional`
+
+Mutating operations (persist, update, delete) must run inside a transaction. Annotate the method or class with `@Transactional`:
+
+```java PersonResource.java
+package org.acme;
+
+import jakarta.transaction.Transactional;
+import jakarta.ws.rs.*;
+import jakarta.ws.rs.core.*;
+import java.net.URI;
+import java.util.List;
+
+@Path("/persons")
+@Produces(MediaType.APPLICATION_JSON)
+@Consumes(MediaType.APPLICATION_JSON)
+public class PersonResource {
+
+    @GET
+    public List<Person> list() {
+        return Person.listAll();
+    }
+
+    @GET
+    @Path("/{id}")
+    public Person get(@PathParam("id") Long id) {
+        return Person.findById(id);
+    }
+
+    @POST
+    @Transactional
+    public Response create(Person person) {
+        person.persist();
+        return Response.created(URI.create("/persons/" + person.id)).build();
+    }
+
+    @PUT
+    @Path("/{id}")
+    @Transactional
+    public Person update(@PathParam("id") Long id, Person incoming) {
+        Person entity = Person.findById(id);
+        if (entity == null) throw new NotFoundException();
+        entity.name = incoming.name;
+        return entity; // dirty checking flushes the update automatically
+    }
+
+    @DELETE
+    @Path("/{id}")
+    @Transactional
+    public void delete(@PathParam("id") Long id) {
+        Person entity = Person.findById(id);
+        if (entity == null) throw new NotFoundException();
+        entity.delete();
+    }
+}
+```
+
+<Note>
+`@Transactional` applies to CDI beans only. It has no effect on plain Java objects that are not managed by the CDI container.
+</Note>

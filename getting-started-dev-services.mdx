@@ -1,0 +1,290 @@
+---
+title: "Zero-Config Dev Services for Local Development"
+description: "Dev Services auto-starts containerized databases and brokers in dev and test mode via Testcontainers — no manual installation or configuration required."
+---
+
+When you add a database extension such as `jdbc-postgresql` or a messaging extension such as `kafka` to your Quarkus project, you might expect to spend time installing and configuring those services locally. With Dev Services, you do not have to. Quarkus detects that your application needs a service and automatically starts a containerized instance using Testcontainers, wires the connection details into your application's configuration, and shuts the container down cleanly when you stop the application.
+
+This tutorial builds on the concepts from [your first Quarkus application](/getting-started). You will create an application that writes and reads data from a PostgreSQL database — without ever manually starting or configuring a database.
+
+## Prerequisites
+
+- JDK 17 or later
+- Apache Maven 3.9.9+ or Gradle 8.x
+- Docker or Podman (Dev Services uses Testcontainers to manage containers)
+
+<Warning>
+  A running container runtime is required for Dev Services. If Docker or Podman is not available, Quarkus will log errors when it tries to start the managed containers.
+</Warning>
+
+## Bootstrap the project
+
+<Steps>
+  <Step title="Create the application">
+    <CodeGroup>
+
+    ```bash Quarkus CLI
+    quarkus create app org.acme:getting-started-dev-services \
+        --extension='rest'
+    cd getting-started-dev-services
+    ```
+
+    ```bash Maven
+    mvn io.quarkus.platform:quarkus-maven-plugin:3.17.5:create \
+        -DprojectGroupId=org.acme \
+        -DprojectArtifactId=getting-started-dev-services \
+        -Dextensions='rest'
+    cd getting-started-dev-services
+    ```
+
+    </CodeGroup>
+  </Step>
+
+  <Step title="Start the application in Dev Mode">
+    <CodeGroup>
+
+    ```bash Quarkus CLI
+    quarkus dev
+    ```
+
+    ```bash Maven
+    ./mvnw quarkus:dev
+    ```
+
+    </CodeGroup>
+
+    Once started, visit `http://localhost:8080/hello`. You should see: `Hello from Quarkus REST`.
+  </Step>
+
+  <Step title="Accept a query parameter">
+    Open `src/main/java/org/acme/GreetingResource.java` and update the `hello` method to accept a name:
+
+    ```java src/main/java/org/acme/GreetingResource.java
+    public String hello(@RestQuery String name) {
+        return "Hello " + name;
+    }
+    ```
+
+    The `@RestQuery` annotation is equivalent to Jakarta REST's `@QueryParam` but without requiring you to repeat the parameter name.
+
+    Visit `http://localhost:8080/hello?name=Bloom`. You should see: `Hello Bloom`.
+  </Step>
+
+  <Step title="Fix the tests">
+    Your change broke the existing test. In your Quarkus terminal, press `r` to run tests. You will see a failure.
+
+    Open `src/test/java/org/acme/GreetingResourceTest.java` and replace the exact string match:
+
+    ```java
+    .body(is("Hello from Quarkus REST"));
+    ```
+
+    with a flexible matcher:
+
+    ```java
+    .body(containsString("Hello"));
+    ```
+
+    The tests should now pass.
+  </Step>
+</Steps>
+
+## Add persistence with Panache
+
+### Add the persistence extensions
+
+<CodeGroup>
+
+```bash Quarkus CLI
+quarkus ext add hibernate-orm-panache jdbc-postgresql
+```
+
+```bash Maven
+./mvnw quarkus:add-extension -Dextensions='hibernate-orm-panache,jdbc-postgresql'
+```
+
+```bash Gradle
+./gradlew addExtension --extensions='hibernate-orm-panache,jdbc-postgresql'
+```
+
+</CodeGroup>
+
+### Create a Panache entity
+
+Create `src/main/java/org/acme/Greeting.java`:
+
+```java src/main/java/org/acme/Greeting.java
+import io.quarkus.hibernate.orm.panache.PanacheEntity;
+import jakarta.persistence.Entity;
+
+@Entity
+public class Greeting extends PanacheEntity {
+    public String name;
+}
+```
+
+`PanacheEntity` follows the active record pattern: data access methods (`persist`, `listAll`, `findById`, `delete`, etc.) live directly on the entity class rather than on a separate repository. Quarkus generates the `id` field and its sequence automatically.
+
+### Write data
+
+Update the `hello` method in `GreetingResource` to persist each greeting:
+
+```java src/main/java/org/acme/GreetingResource.java
+@GET
+@Transactional
+@Produces(MediaType.TEXT_PLAIN)
+public String hello(@QueryParam("name") String name) {
+    Greeting greeting = new Greeting();
+    greeting.name = name;
+    greeting.persist();
+    return "Hello " + name;
+}
+```
+
+The `@Transactional` annotation wraps the method in a JTA transaction, which is required for any database write.
+
+<Note>
+  Using `@GET` to modify application state is not a REST best practice. In a production application, use `@POST` for writes. Here it is done for simplicity so you can test the endpoint by visiting it in a browser.
+</Note>
+
+### Read data
+
+Add a second endpoint to read back all recorded greetings:
+
+```java src/main/java/org/acme/GreetingResource.java
+@GET
+@Path("names")
+@Produces(MediaType.TEXT_PLAIN)
+public String names() {
+    List<Greeting> greetings = Greeting.listAll();
+    String names = greetings.stream()
+        .map(g -> g.name)
+        .collect(Collectors.joining(", "));
+    return "I've said hello to " + names;
+}
+```
+
+Visit `http://localhost:8080/hello?name=Bloom`, then `http://localhost:8080/hello/names`. You should see: `I've said hello to Bloom`.
+
+## How Dev Services works
+
+At this point your application is reading from and writing to a PostgreSQL database — but you never installed or configured one. Where did it come from?
+
+When Quarkus starts in dev or test mode and detects a JDBC or reactive database extension without explicit connection configuration, it starts a container automatically. Run `docker ps` (or `podman ps`) while your application is running to see it:
+
+```bash
+docker ps
+```
+
+```
+ff88dcedd899  postgres:14  postgres -c fsync...  20 minutes ago  Up 20 minutes  0.0.0.0:34789->5432/tcp  nostalgic_bassi
+```
+
+Stop Quarkus and run `docker ps` again — the container will have been removed. Quarkus starts and stops Dev Services containers together with the application.
+
+Dev Services are available for a broad range of services. The service that is started depends on which extension you add:
+
+| Extension | Dev Service |
+|---|---|
+| `jdbc-postgresql` / `reactive-pg-client` | PostgreSQL |
+| `jdbc-mysql` / `reactive-mysql-client` | MySQL |
+| `jdbc-mariadb` | MariaDB |
+| `jdbc-h2` | H2 (in-process, no container) |
+| `jdbc-mssql` | Microsoft SQL Server |
+| `jdbc-db2` | IBM DB2 |
+| `jdbc-oracle` | Oracle Database |
+| `kafka` | Apache Kafka (via Redpanda) |
+| `redis-client` | Redis |
+| `elasticsearch-rest-client` | Elasticsearch / OpenSearch |
+| `keycloak-authorization` | Keycloak |
+| `rabbitmq-client` | RabbitMQ |
+| `pulsar-client` | Apache Pulsar |
+
+## Seed data on startup
+
+By default in dev mode with a Dev Services database, Quarkus sets Hibernate ORM's schema management strategy to `drop-and-create`. Every time the application restarts (including after a hot reload that triggers a full restart), the tables are dropped and re-created.
+
+To ensure the database always contains baseline data, create an `import.sql` file:
+
+<Steps>
+  <Step title="Create the file">
+    Create `src/main/resources/import.sql`:
+
+    ```sql src/main/resources/import.sql
+    INSERT INTO Greeting(id, name)
+    VALUES (nextval('Greeting_SEQ'), 'Alice');
+    INSERT INTO Greeting(id, name)
+    VALUES (nextval('Greeting_SEQ'), 'Bob');
+    ```
+  </Step>
+
+  <Step title="Force a full restart">
+    In your dev mode terminal, press `s` to trigger a full restart. Then visit `http://localhost:8080/hello/names`.
+
+    Alice and Bob will always appear in the list, regardless of whether the schema was just re-created.
+  </Step>
+</Steps>
+
+## Controlling Dev Services
+
+### Use an external database
+
+If you want to connect to a database you manage yourself, add connection configuration to `application.properties`. The presence of a `quarkus.datasource.jdbc.url` (or reactive equivalent) tells Quarkus that Dev Services should not start a container:
+
+```properties src/main/resources/application.properties
+quarkus.datasource.db-kind = postgresql
+quarkus.datasource.username = leopold
+quarkus.datasource.password = bloom
+quarkus.datasource.jdbc.url = jdbc:postgresql://localhost:5432/mydatabase
+```
+
+If you save this and the external database is not running, you will see a connection error in the logs — which is expected, because Dev Services has been disabled and the external database is not available.
+
+### Use profiles to separate dev and production config
+
+You almost certainly do not want to use Dev Services in production. Quarkus only activates Dev Services in `dev` and `test` profiles, never in `prod`. But if you have defined external database config without a profile prefix, it will override Dev Services in all modes.
+
+Use the `%prod.` prefix to restrict configuration to the production profile only:
+
+```properties src/main/resources/application.properties
+# Used only in production — Dev Services still runs in dev and test
+%prod.quarkus.datasource.db-kind = postgresql
+%prod.quarkus.datasource.username = leopold
+%prod.quarkus.datasource.password = bloom
+%prod.quarkus.datasource.jdbc.url = jdbc:postgresql://localhost:5432/mydatabase
+```
+
+With this configuration, your dev and test environments use the automatically managed container, and production connects to your real database. No code changes required between environments.
+
+<Tip>
+  After adding the `%prod.` prefix, visit `http://localhost:8080/hello/names` again. Dev Services are re-enabled automatically — no restart of Quarkus is needed because Dev Mode detects the configuration change.
+</Tip>
+
+### Disable Dev Services for a specific datasource
+
+You can also disable Dev Services selectively in `application.properties`:
+
+```properties
+quarkus.datasource.devservices.enabled=false
+```
+
+This is useful if you want to start the container yourself and manage its lifecycle independently.
+
+## Summary
+
+You built a Quarkus application that persists data to PostgreSQL using Hibernate ORM with Panache, without installing or configuring a database. Dev Services provisioned the container automatically, wired its credentials into your application, and cleaned up when you stopped.
+
+<CardGroup cols={2}>
+  <Card title="Hibernate ORM with Panache" icon="database" href="/hibernate-orm-panache">
+    Learn the full Panache API: repositories, custom queries, pagination, and more.
+  </Card>
+  <Card title="Configuration profiles" icon="sliders" href="/config">
+    Understand dev, test, and prod profiles and all available configuration sources.
+  </Card>
+  <Card title="Reactive application" icon="bolt" href="/getting-started-reactive">
+    Build the same kind of CRUD application using reactive, non-blocking database clients.
+  </Card>
+  <Card title="Datasource configuration" icon="server" href="/datasource">
+    Full reference for JDBC and reactive datasource configuration options.
+  </Card>
+</CardGroup>

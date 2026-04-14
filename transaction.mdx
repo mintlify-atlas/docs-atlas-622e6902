@@ -1,0 +1,249 @@
+---
+title: "Managing Transactions in Quarkus"
+description: "Use @Transactional for JTA transaction management, control propagation behavior, configure rollback rules, and handle reactive transactions with Panache."
+---
+
+Quarkus transaction support is provided by the `quarkus-narayana-jta` extension, which implements the [Jakarta Transactions](https://jakarta.ee/specifications/transactions/) specification (formerly JTA). Most applications get the transaction manager for free — Hibernate ORM includes and configures it automatically. If you use transactions without Hibernate ORM you need to add the extension explicitly, but in either case the programming model is the same.
+
+<Note>
+`@Transactional` and all declarative transaction management work on **CDI beans only**. Placing `@Transactional` on a plain Java class that is not managed by the CDI container has no effect.
+</Note>
+
+## Adding the dependency
+
+You only need to add this explicitly if your project does not already include Hibernate ORM or another extension that pulls it in transitively:
+
+<CodeGroup>
+
+```xml pom.xml
+<dependency>
+    <groupId>io.quarkus</groupId>
+    <artifactId>quarkus-narayana-jta</artifactId>
+</dependency>
+```
+
+```gradle build.gradle
+implementation("io.quarkus:quarkus-narayana-jta")
+```
+
+</CodeGroup>
+
+## Declarative transactions with `@Transactional`
+
+The simplest way to demarcate a transaction is to annotate a CDI bean method with `@Transactional` (`jakarta.transaction.Transactional`). Quarkus wraps the method in a transaction boundary, committing on successful return and rolling back on an uncaught `RuntimeException`.
+
+```java SantaClausService.java
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.transaction.Transactional;
+
+@ApplicationScoped
+public class SantaClausService {
+
+    @Inject ChildDAO childDAO;
+    @Inject SantaClausDAO santaDAO;
+
+    @Transactional
+    public void getAGiftFromSanta(Child child, String giftDescription) {
+        Gift gift = childDAO.addToGiftList(child, giftDescription);
+        if (gift == null) {
+            throw new OMGGiftNotRecognizedException(); // rolls back
+        }
+        santaDAO.addToSantaTodoList(gift);
+    }
+}
+```
+
+You can place `@Transactional` at the class level to make every method transactional without repeating the annotation. The transaction context propagates to all methods called within the annotated method boundary, so nested calls to `childDAO` and `santaDAO` above participate in the same transaction.
+
+## Transaction propagation
+
+Control how a transaction boundary interacts with an existing active transaction using the `value` attribute:
+
+| Propagation type | Behaviour |
+|---|---|
+| `REQUIRED` *(default)* | Joins an existing transaction; starts a new one if none is active. |
+| `REQUIRES_NEW` | Always starts a new transaction; suspends any active transaction for the duration of the method. |
+| `MANDATORY` | Throws an exception if no transaction is active; joins the existing one otherwise. |
+| `SUPPORTS` | Joins an active transaction if one exists; runs without a transaction otherwise. |
+| `NOT_SUPPORTED` | Suspends any active transaction and runs without one; resumes the original transaction afterwards. |
+| `NEVER` | Throws an exception if a transaction is active; runs without one otherwise. |
+
+`REQUIRED` and `NOT_SUPPORTED` are the two most commonly useful values — they let you explicitly choose whether a method should always run inside or always run outside a transaction.
+
+```java
+@Transactional(Transactional.TxType.REQUIRES_NEW)
+public void auditEvent(String event) {
+    // always in its own transaction — commits independently of the caller
+    auditDAO.record(event);
+}
+```
+
+## Rollback rules
+
+By default, any `RuntimeException` that crosses the method boundary triggers a rollback. Checked exceptions do not. You can override this behaviour with the `rollbackOn` and `dontRollbackOn` attributes:
+
+```java
+// roll back on a checked exception
+@Transactional(rollbackOn = IOException.class)
+public void importFile(Path file) throws IOException { ... }
+
+// do not roll back even for a RuntimeException
+@Transactional(dontRollbackOn = OptimisticLockException.class)
+public void updateRecord(Record r) { ... }
+```
+
+To mark a transaction for rollback programmatically without throwing an exception, inject `TransactionManager`:
+
+```java
+import jakarta.transaction.TransactionManager;
+
+@ApplicationScoped
+public class SantaClausService {
+
+    @Inject TransactionManager tm;
+    @Inject ChildDAO childDAO;
+
+    @Transactional
+    public void getAGiftFromSanta(Child child, String giftDescription) {
+        Gift gift = childDAO.addToGiftList(child, giftDescription);
+        if (gift == null) {
+            tm.setRollbackOnly(); // mark for rollback without throwing
+        }
+    }
+}
+```
+
+## Transaction timeout
+
+Use `@TransactionConfiguration` alongside `@Transactional` to set a per-method or per-class transaction timeout (in seconds):
+
+```java
+import io.quarkus.narayana.jta.runtime.TransactionConfiguration;
+
+@Transactional
+@TransactionConfiguration(timeout = 5) // 5 seconds
+public void slowOperation() { ... }
+```
+
+The annotation may only be placed on the top-level method that starts the transaction — not on nested transactional methods. The default global timeout is 60 seconds, configurable via:
+
+```properties application.properties
+quarkus.transaction-manager.default-transaction-timeout=30S
+```
+
+## `@TransactionScoped` CDI scope
+
+CDI beans can be scoped to the lifetime of an active transaction using `@TransactionScoped`. The bean is created when a transaction begins and destroyed (along with any state it holds) when the transaction commits or rolls back:
+
+```java
+import jakarta.transaction.TransactionScoped;
+
+@TransactionScoped
+public class TransactionState {
+    private final List<String> auditLog = new ArrayList<>();
+
+    public void addEntry(String entry) {
+        auditLog.add(entry);
+    }
+
+    public List<String> getLog() {
+        return Collections.unmodifiableList(auditLog);
+    }
+}
+```
+
+## Programmatic transaction control
+
+### `QuarkusTransaction` API
+
+`QuarkusTransaction` provides a fluent API for defining transaction boundaries in code:
+
+```java
+import io.quarkus.narayana.jta.QuarkusTransaction;
+
+// begin / commit / rollback explicitly
+QuarkusTransaction.begin();
+// ... do work ...
+QuarkusTransaction.commit();
+
+// begin with a custom timeout, then roll back
+QuarkusTransaction.begin(QuarkusTransaction.beginOptions().timeout(10));
+// ... do work ...
+QuarkusTransaction.rollback();
+
+// lambda-scoped: runs the Runnable in a brand-new transaction
+QuarkusTransaction.requiringNew().run(() -> {
+    // ... do work ...
+});
+
+// lambda-scoped: joins an existing transaction or starts one
+QuarkusTransaction.joiningExisting().run(() -> {
+    // ... do work ...
+});
+
+// lambda-scoped with custom exception handling
+int result = QuarkusTransaction.requiringNew()
+    .timeout(10)
+    .exceptionHandler(throwable -> {
+        if (throwable instanceof SomeExpectedException) {
+            return TransactionExceptionResult.COMMIT;
+        }
+        return TransactionExceptionResult.ROLLBACK;
+    })
+    .call(() -> {
+        // ... do work ...
+        return 42;
+    });
+```
+
+### `UserTransaction` (legacy JTA API)
+
+For compatibility with standard JTA code, inject `UserTransaction` directly:
+
+```java
+import jakarta.transaction.UserTransaction;
+
+@ApplicationScoped
+public class SantaClausService {
+
+    @Inject UserTransaction transaction;
+    @Inject ChildDAO childDAO;
+
+    public void getAGiftFromSanta(Child child, String giftDescription) {
+        try {
+            transaction.begin();
+            childDAO.addToGiftList(child, giftDescription);
+            transaction.commit();
+        } catch (SomeException e) {
+            transaction.rollback();
+        }
+    }
+}
+```
+
+<Note>
+`UserTransaction` cannot be used inside a method that is already under a `@Transactional` boundary. Attempting to call `transaction.begin()` when a transaction is already active will throw an exception.
+</Note>
+
+## Reactive transactions
+
+For Hibernate Reactive and other reactive data sources, `@Transactional` is not used directly on the reactive pipeline. Use `Panache.withTransaction()` to scope a reactive chain inside a transaction:
+
+```java
+import io.quarkus.hibernate.reactive.panache.Panache;
+import io.smallrye.mutiny.Uni;
+
+public Uni<Person> createPerson(String name) {
+    return Panache.withTransaction(() -> {
+        Person person = new Person();
+        person.name = name;
+        return person.persist();
+    });
+}
+```
+
+`Panache.withTransaction()` starts a transaction before the `Uni` pipeline is subscribed to and commits (or rolls back) when it terminates. The transaction context is propagated through the reactive pipeline so all operations inside the lambda share the same session and transaction.
+
+<Tip>
+If your `@Transactional`-annotated method returns a reactive type such as `Uni`, `Multi`, or `CompletionStage`, Quarkus delays commit until that reactive value terminates — not until the method returns. Context propagation handles carrying the transaction across async boundaries.
+</Tip>

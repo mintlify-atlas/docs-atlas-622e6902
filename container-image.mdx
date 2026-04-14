@@ -1,0 +1,241 @@
+---
+title: "Building Container Images for Quarkus Apps"
+description: "Build Docker and container images for Quarkus JVM and native applications using Jib, Docker, or Podman extensions with one-command image builds."
+---
+
+Quarkus integrates container image building directly into its build lifecycle. With the right extension on the classpath, a single build command produces a ready-to-deploy image for either JVM or native mode — no separate `docker build` step required.
+
+## Available extensions
+
+Quarkus provides five container image extensions. Choose one based on your toolchain and deployment target:
+
+<CardGroup cols={2}>
+  <Card title="quarkus-container-image-jib" icon="layer-group">
+    Builds images without a local Docker daemon. Caches dependencies in a separate layer for fast incremental pushes. Best for CI environments.
+  </Card>
+  <Card title="quarkus-container-image-docker" icon="docker">
+    Uses the local Docker binary and the generated `Dockerfiles` under `src/main/docker`. Supports multi-platform builds via `docker buildx`.
+  </Card>
+  <Card title="quarkus-container-image-podman" icon="box">
+    Uses the local Podman binary and the same generated `Dockerfiles`. Supports native multi-platform builds without the buildx plugin.
+  </Card>
+  <Card title="quarkus-container-image-openshift" icon="cloud">
+    Performs binary builds inside an OpenShift cluster. Pairs with `DeploymentConfig` for easy rollouts.
+  </Card>
+  <Card title="quarkus-container-image-buildpack" icon="package">
+    Uses Cloud Native Buildpacks. Requires a Docker daemon and a configured builder image.
+  </Card>
+</CardGroup>
+
+## Adding an extension
+
+<Tabs>
+  <Tab title="Docker">
+    ```bash
+    quarkus extension add quarkus-container-image-docker
+    ```
+
+    Or in Maven:
+
+    ```xml
+    <dependency>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-container-image-docker</artifactId>
+    </dependency>
+    ```
+  </Tab>
+  <Tab title="Jib">
+    ```bash
+    quarkus extension add quarkus-container-image-jib
+    ```
+
+    Or in Maven:
+
+    ```xml
+    <dependency>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-container-image-jib</artifactId>
+    </dependency>
+    ```
+  </Tab>
+  <Tab title="Podman">
+    ```bash
+    quarkus extension add quarkus-container-image-podman
+    ```
+
+    Or in Maven:
+
+    ```xml
+    <dependency>
+      <groupId>io.quarkus</groupId>
+      <artifactId>quarkus-container-image-podman</artifactId>
+    </dependency>
+    ```
+  </Tab>
+</Tabs>
+
+<Warning>
+Only one container image extension should be active per build. If multiple extensions are on the classpath, Quarkus raises an error. Resolve the conflict by removing the unused extension or by setting `quarkus.container-image.builder=docker` (or `jib` / `podman`) in `application.properties`.
+</Warning>
+
+## Building an image
+
+Set `quarkus.container-image.build=true` at build time:
+
+```bash
+# Maven
+./mvnw package -Dquarkus.container-image.build=true
+
+# Gradle
+./gradlew build -Dquarkus.container-image.build=true
+
+# Quarkus CLI
+quarkus build -Dquarkus.container-image.build=true
+```
+
+## Pushing an image
+
+```bash
+./mvnw package -Dquarkus.container-image.push=true
+```
+
+If no registry is configured, images are pushed to `docker.io` by default.
+
+## Image naming and registry configuration
+
+Control the image name and destination via `application.properties`:
+
+```properties
+quarkus.container-image.registry=quay.io
+quarkus.container-image.group=myorg
+quarkus.container-image.name=my-app
+quarkus.container-image.tag=1.0.0
+```
+
+This produces the image `quay.io/myorg/my-app:1.0.0`.
+
+You can also set the full image reference in one property:
+
+```properties
+quarkus.container-image.image=quay.io/myorg/my-app:1.0.0
+```
+
+### Using CI environment variables
+
+Many CI systems expose a registry image variable. Reference it directly in your config:
+
+```properties
+quarkus.container-image.image=${CI_REGISTRY_IMAGE}
+```
+
+## JVM image vs. native image
+
+Quarkus generates different `Dockerfiles` for JVM and native modes under `src/main/docker/`:
+
+| File | Mode | Base image |
+|---|---|---|
+| `Dockerfile.jvm` | JVM | `ubi9/openjdk-21-runtime` |
+| `Dockerfile.native` | Native | `ubi9/micro` |
+| `Dockerfile.native-micro` | Native (minimal) | `ubi9/micro` |
+
+To build a **native** container image:
+
+```bash
+./mvnw package -Dnative -Dquarkus.container-image.build=true \
+  -Dquarkus.native.container-build=true
+```
+
+The `-Dquarkus.native.container-build=true` flag compiles the native binary inside a builder container, ensuring a Linux binary is produced regardless of your host OS.
+
+<Tip>
+If you already have a native binary and want to avoid recompiling, set `-Dquarkus.native.reuse-existing=true`.
+</Tip>
+
+## Extension-specific behavior
+
+<Tabs>
+  <Tab title="Docker">
+    The Docker extension invokes the local `docker` binary using the generated `Dockerfile` under `src/main/docker`. It supports multi-platform image builds via `docker buildx`:
+
+    ```properties
+    quarkus.docker.buildx.platform=linux/amd64,linux/arm64
+    ```
+
+    <Note>
+    When building for more than one platform with `buildx`, the resulting images cannot be loaded into the local `docker images` store. You must push them directly with `quarkus.container-image.push=true`.
+    </Note>
+  </Tab>
+  <Tab title="Jib">
+    Jib builds images without a running Docker daemon by talking directly to the container registry. Benefits:
+
+    - Application dependencies are cached in a separate layer from application classes, so incremental pushes only upload changed layers.
+    - No Docker installation required when pushing directly to a registry.
+
+    When `quarkus.container-image.push` is `false` (the default), Jib still requires Docker to load the image into the local daemon.
+
+    Add extra files to the image by placing them under `src/main/jib/`:
+
+    ```
+    src/main/jib/
+    └── config/
+        └── app.json   →  /config/app.json in the container
+    ```
+
+    Enable remote JVM debugging at runtime:
+
+    ```properties
+    quarkus.jib.jvm-additional-arguments=-agentlib:jdwp=transport=dt_socket\,server=y\,suspend=n\,address=*:5005
+    ```
+  </Tab>
+  <Tab title="Podman">
+    The Podman extension uses the `podman` binary and the same `Dockerfiles` as the Docker extension. Unlike Docker, Podman supports native multi-platform builds without a plugin:
+
+    ```properties
+    quarkus.podman.platform=linux/amd64,linux/arm64
+    ```
+
+    Use the Podman extension (rather than the Docker extension with the Docker-compatible socket) when you need Podman-specific multi-platform behavior.
+  </Tab>
+</Tabs>
+
+## Generated Dockerfiles
+
+Quarkus scaffolds production-ready `Dockerfiles` in `src/main/docker/` when you create a project. These files are yours to customize.
+
+```
+src/main/docker/
+├── Dockerfile.jvm            # Multi-layer JVM image
+├── Dockerfile.native         # Native binary image (glibc)
+└── Dockerfile.native-micro   # Native binary image (minimal base)
+```
+
+A typical JVM `Dockerfile` layers the application and its dependencies separately for efficient caching:
+
+```dockerfile
+FROM registry.access.redhat.com/ubi9/openjdk-21:1.20
+
+ENV LANGUAGE='en_US:en'
+
+COPY --chown=185 target/quarkus-app/lib/ /deployments/lib/
+COPY --chown=185 target/quarkus-app/*.jar /deployments/
+COPY --chown=185 target/quarkus-app/app/ /deployments/app/
+COPY --chown=185 target/quarkus-app/quarkus/ /deployments/quarkus/
+
+EXPOSE 8080
+USER 185
+ENV JAVA_APP_JAR="/deployments/quarkus-run.jar"
+
+ENTRYPOINT [ "/opt/jboss/container/java/run/run-java.sh" ]
+```
+
+## Running integration tests against the container image
+
+Build the image and run `@QuarkusIntegrationTest` tests against it:
+
+```bash
+# Maven
+./mvnw verify -Dquarkus.container-image.build=true
+
+# Gradle
+./gradlew quarkusIntTest -Dquarkus.container-image.build=true
+```

@@ -1,0 +1,225 @@
+---
+title: "Configuring Logging in Quarkus"
+description: "Set log levels per category, format console output, enable JSON structured logs, configure file logging, and use MDC in Quarkus applications."
+keywords: ["logging", "JBoss Logging", "SLF4J", "log levels", "JSON logging", "MDC", "structured logs", "quarkus logging"]
+---
+
+Quarkus uses **JBoss Log Manager** as its logging backend. All log output—from your application code, from Quarkus itself, and from the libraries it manages—is routed through a single pipeline that you control via `application.properties`.
+
+You are not locked into one logging API. Quarkus ships adapters for SLF4J, Apache Log4j 2, Log4j 1, and Apache Commons Logging, so existing code that uses any of those facades works without changes.
+
+## Choose a logging API
+
+| API | How to use it |
+|---|---|
+| JBoss Logging | Built-in. No extra dependency needed. |
+| `io.quarkus.logging.Log` | Built-in simplified API. Static methods; no field declaration needed. |
+| SLF4J | Add the `quarkus-logging-slf4j` adapter. |
+| Apache Log4j 2 | Add the `quarkus-logging-log4j2` adapter. |
+| `java.util.logging` | Built-in. Routes to JBoss Log Manager automatically. |
+
+## Get a logger
+
+### Classic field declaration
+
+```java
+package com.example;
+
+import org.jboss.logging.Logger;
+
+public class OrderService {
+
+    private static final Logger log = Logger.getLogger(OrderService.class);
+
+    public void placeOrder(String orderId) {
+        log.infof("Placing order %s", orderId);
+    }
+}
+```
+
+### Simplified API (no field required)
+
+Quarkus can inject the logger field for you at build time. Use `io.quarkus.logging.Log` with static calls:
+
+```java
+package com.example;
+
+import io.quarkus.logging.Log;
+
+public class OrderService {
+
+    public void placeOrder(String orderId) {
+        Log.infof("Placing order %s", orderId);
+    }
+}
+```
+
+<Warning>
+Use `Log` only in application classes compiled by Quarkus. Calling `Log` methods from external JARs will throw an exception because Quarkus cannot rewrite them at build time.
+</Warning>
+
+### CDI injection
+
+```java
+import io.quarkus.logging.Log;
+import org.jboss.logging.Logger;
+import jakarta.inject.Inject;
+
+@ApplicationScoped
+public class InventoryService {
+
+    @Inject
+    Logger logger; // Quarkus injects a logger named after the declaring class.
+
+    public void checkStock(String sku) {
+        logger.debugf("Checking stock for SKU %s", sku);
+    }
+}
+```
+
+## Log levels
+
+Quarkus supports the following levels, from most to least verbose:
+
+`TRACE` → `DEBUG` → `INFO` → `WARN` → `ERROR` → `FATAL`
+
+The default level is `INFO`. Change the root level or narrow it to a specific package:
+
+```properties
+# Root level for all loggers
+quarkus.log.level=INFO
+
+# Verbose output for your own code during development
+quarkus.log.category."com.example".level=DEBUG
+
+# Silence a noisy library
+quarkus.log.category."io.netty".level=WARN
+```
+
+<Tip>
+In `quarkus dev`, you can change log levels at runtime without restarting by pressing `r` to open the Dev UI.
+</Tip>
+
+## Console output
+
+By default, Quarkus writes logs to stdout with a human-readable format.
+
+```properties
+# Custom format string (default shown)
+quarkus.log.console.format=%d{yyyy-MM-dd HH:mm:ss,SSS} %-5p [%c{3.}] (%t) %s%e%n
+
+# Colorize output (enabled by default when a TTY is detected)
+quarkus.log.console.color=true
+
+# Minimum level to send to the console
+quarkus.log.console.level=DEBUG
+```
+
+Format tokens follow the JBoss Log Manager pattern syntax: `%d` for date/time, `%p` for level, `%c` for category, `%t` for thread, `%s` for the message, `%e` for exception, `%n` for newline.
+
+## JSON logging
+
+For structured log output—essential when shipping logs to Elasticsearch, Loki, or another log aggregation system—add the JSON logging extension:
+
+<Tabs>
+  <Tab title="Maven">
+    ```xml
+    <dependency>
+        <groupId>io.quarkus</groupId>
+        <artifactId>quarkus-logging-json</artifactId>
+    </dependency>
+    ```
+  </Tab>
+  <Tab title="Gradle">
+    ```groovy
+    implementation("io.quarkus:quarkus-logging-json")
+    ```
+  </Tab>
+  <Tab title="Quarkus CLI">
+    ```bash
+    quarkus extension add logging-json
+    ```
+  </Tab>
+</Tabs>
+
+With the extension present, console output switches to JSON automatically. Each log line becomes a JSON object:
+
+```json
+{
+  "timestamp": "2024-06-01T12:00:00.000Z",
+  "sequence": 42,
+  "loggerClassName": "org.jboss.logging.Logger",
+  "loggerName": "com.example.OrderService",
+  "level": "INFO",
+  "message": "Placing order ORD-001",
+  "threadName": "executor-thread-1",
+  "threadId": 42,
+  "mdc": {
+    "traceId": "abc123",
+    "requestId": "req-456"
+  }
+}
+```
+
+Disable JSON for local development while keeping it in production:
+
+```properties
+# application.properties (production default)
+quarkus.log.console.json=true
+
+# %dev profile overrides this for the local console
+%dev.quarkus.log.console.json=false
+```
+
+## File logging
+
+Write logs to a file in addition to (or instead of) the console:
+
+```properties
+quarkus.log.file.enable=true
+quarkus.log.file.path=/var/log/myapp/app.log
+quarkus.log.file.level=INFO
+quarkus.log.file.format=%d{yyyy-MM-dd HH:mm:ss,SSS} %-5p [%c{3.}] (%t) %s%e%n
+
+# Rotate the log file daily, keeping the last 5 rotations
+quarkus.log.file.rotation.max-backup-index=5
+quarkus.log.file.rotation.rotate-on-boot=true
+```
+
+## MDC — Mapped Diagnostic Context
+
+MDC lets you attach key-value pairs to the current thread that are automatically included in every log line. This is useful for tracking a request ID, user ID, or tenant across all log output produced during a request.
+
+```java
+import org.jboss.logging.MDC;
+
+@ServerRequestFilter
+public class RequestIdFilter {
+
+    public void filter(ContainerRequestContext ctx) {
+        String requestId = ctx.getHeaderString("X-Request-ID");
+        if (requestId != null) {
+            MDC.put("requestId", requestId);
+        }
+    }
+}
+```
+
+Reference MDC values in your format string with `%X{key}`:
+
+```properties
+quarkus.log.console.format=%d{HH:mm:ss} %-5p [%c{3.}] requestId=%X{requestId} %s%e%n
+```
+
+MDC entries are included automatically in the JSON output when using `quarkus-logging-json`.
+
+## Forward logs via OpenTelemetry
+
+To ship logs to a centralized backend using OTLP alongside your traces, enable OTel log export in the `quarkus-opentelemetry` extension:
+
+```properties
+quarkus.otel.logs.enabled=true
+quarkus.otel.exporter.otlp.endpoint=http://otel-collector:4317
+```
+
+See the [OpenTelemetry guide](/opentelemetry) for full exporter configuration.

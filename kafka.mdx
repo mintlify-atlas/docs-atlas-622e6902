@@ -1,0 +1,336 @@
+---
+title: "Apache Kafka Integration with Quarkus"
+description: "Connect Quarkus applications to Apache Kafka using SmallRye Reactive Messaging — produce and consume messages, configure serialization, and use Kafka Streams."
+keywords: ["quarkus", "kafka", "smallrye", "reactive messaging", "kafka streams", "serialization", "dev services", "avro", "jackson"]
+---
+
+[Apache Kafka](https://kafka.apache.org) is a distributed event streaming platform commonly used for high-performance data pipelines, streaming analytics, and event-driven microservices. Quarkus integrates with Kafka through the `quarkus-messaging-kafka` extension, which wraps the [SmallRye Reactive Messaging](https://smallrye.io/smallrye-reactive-messaging/) framework and maps Reactive Messaging channels to Kafka topics.
+
+## Adding the extension
+
+```bash
+quarkus extension add messaging-kafka
+```
+
+Or add the dependency directly:
+
+<CodeGroup>
+
+```xml pom.xml
+<dependency>
+    <groupId>io.quarkus</groupId>
+    <artifactId>quarkus-messaging-kafka</artifactId>
+</dependency>
+```
+
+```gradle build.gradle
+implementation("io.quarkus:quarkus-messaging-kafka")
+```
+
+</CodeGroup>
+
+<Note>
+The extension bundles `kafka-clients` and is compatible with Kafka brokers version 2.x and above.
+</Note>
+
+## How channels map to topics
+
+SmallRye Reactive Messaging uses a connector model: your code works with named channels, and the connector maps those channels to Kafka topics. The connector for Kafka is named `smallrye-kafka`.
+
+By default, the topic name matches the channel name. Override it with the `topic` attribute.
+
+## Consuming messages
+
+### Minimal configuration
+
+```properties
+# application.properties
+%prod.kafka.bootstrap.servers=kafka:9092
+mp.messaging.incoming.prices.connector=smallrye-kafka
+```
+
+The `%prod` prefix limits the broker address to the production profile. In dev mode and tests, [Dev Services](#dev-services-for-kafka) starts a broker automatically so no address is needed.
+
+### Consumer bean
+
+```java
+import org.eclipse.microprofile.reactive.messaging.Incoming;
+import jakarta.enterprise.context.ApplicationScoped;
+
+@ApplicationScoped
+public class PriceConsumer {
+
+    @Incoming("prices")
+    public void consume(double price) {
+        // process the price
+    }
+}
+```
+
+### Accessing Kafka metadata
+
+Wrap the parameter in `Message<T>` to read record headers, topic name, partition, and offset — and to control acknowledgment manually:
+
+```java
+import org.eclipse.microprofile.reactive.messaging.Incoming;
+import org.eclipse.microprofile.reactive.messaging.Message;
+import io.smallrye.reactive.messaging.kafka.api.IncomingKafkaRecordMetadata;
+
+@Incoming("prices")
+public CompletionStage<Void> consume(Message<Double> msg) {
+    var meta = msg.getMetadata(IncomingKafkaRecordMetadata.class).orElseThrow();
+    double price = msg.getPayload();
+    return msg.ack(); // commit offset
+}
+```
+
+For direct access to the Kafka `ConsumerRecord`, use `Record`:
+
+```java
+import io.smallrye.reactive.messaging.kafka.Record;
+
+@Incoming("prices")
+public void consume(Record<String, Double> record) {
+    String key = record.key();
+    Double value = record.value();
+}
+```
+
+### Streaming to a REST endpoint
+
+Inject a `Multi` with `@Channel` to bridge Kafka into a Server-Sent Events endpoint:
+
+```java
+import io.smallrye.mutiny.Multi;
+import org.eclipse.microprofile.reactive.messaging.Channel;
+import jakarta.inject.Inject;
+import jakarta.ws.rs.*;
+import jakarta.ws.rs.core.MediaType;
+import org.jboss.resteasy.reactive.RestStreamElementType;
+
+@Path("/prices")
+public class PriceResource {
+
+    @Inject
+    @Channel("prices")
+    Multi<Double> prices;
+
+    @GET
+    @RestStreamElementType(MediaType.TEXT_PLAIN)
+    public Multi<Double> stream() {
+        return prices;
+    }
+}
+```
+
+## Producing messages
+
+### With @Outgoing
+
+Return a `Multi` from an `@Outgoing` method to continuously publish messages:
+
+```java
+import io.smallrye.mutiny.Multi;
+import org.eclipse.microprofile.reactive.messaging.Outgoing;
+import jakarta.enterprise.context.ApplicationScoped;
+import java.time.Duration;
+import java.util.concurrent.ThreadLocalRandom;
+
+@ApplicationScoped
+public class PriceGenerator {
+
+    @Outgoing("prices")
+    public Multi<Double> generate() {
+        return Multi.createFrom().ticks().every(Duration.ofSeconds(1))
+            .map(tick -> ThreadLocalRandom.current().nextDouble(100));
+    }
+}
+```
+
+Add the outgoing channel configuration:
+
+```properties
+mp.messaging.outgoing.prices.connector=smallrye-kafka
+```
+
+### With Emitter
+
+Inject an `Emitter` to send messages from REST endpoints or other imperative code:
+
+```java
+import org.eclipse.microprofile.reactive.messaging.Channel;
+import org.eclipse.microprofile.reactive.messaging.Emitter;
+import jakarta.inject.Inject;
+import jakarta.ws.rs.*;
+
+@Path("/prices")
+public class PriceEndpoint {
+
+    @Inject
+    @Channel("prices")
+    Emitter<Double> priceEmitter;
+
+    @POST
+    public CompletionStage<Void> addPrice(double price) {
+        return priceEmitter.send(price);
+    }
+}
+```
+
+## Blocking processing
+
+Reactive Messaging runs consumer methods on the Vert.x I/O thread. For blocking work such as database writes, annotate the method with `@Blocking`:
+
+```java
+import io.smallrye.reactive.messaging.annotations.Blocking;
+import org.eclipse.microprofile.reactive.messaging.Incoming;
+import jakarta.transaction.Transactional;
+
+@ApplicationScoped
+public class PriceStorage {
+
+    @Incoming("prices")
+    @Transactional
+    public void store(int priceInUsd) {
+        Price price = new Price();
+        price.value = priceInUsd;
+        price.persist();
+    }
+}
+```
+
+<Tip>
+Methods annotated with `@Transactional` are automatically treated as blocking — no explicit `@Blocking` is needed.
+</Tip>
+
+## Serialization
+
+Kafka requires serializers for outgoing messages and deserializers for incoming ones. Configure them in `application.properties`.
+
+### Primitive types (built-in)
+
+```properties
+mp.messaging.incoming.prices.value.deserializer=org.apache.kafka.common.serialization.DoubleDeserializer
+mp.messaging.outgoing.prices.value.serializer=org.apache.kafka.common.serialization.DoubleSerializer
+```
+
+### JSON with Jackson
+
+Add the SmallRye Kafka Jackson integration:
+
+```xml
+<dependency>
+    <groupId>io.quarkus</groupId>
+    <artifactId>quarkus-messaging-kafka</artifactId>
+</dependency>
+<!-- Jackson serializer support is included transitively via the extension -->
+```
+
+Use the Jackson serializer and deserializer in configuration:
+
+```properties
+mp.messaging.outgoing.prices.value.serializer=io.quarkus.kafka.client.serialization.ObjectMapperSerializer
+mp.messaging.incoming.prices.value.deserializer=io.quarkus.kafka.client.serialization.ObjectMapperDeserializer
+mp.messaging.incoming.prices.value.deserializer.target-type=org.acme.Price
+```
+
+### Avro with Apicurio Schema Registry
+
+Add the Avro and Apicurio dependencies:
+
+```xml
+<dependency>
+    <groupId>io.quarkus</groupId>
+    <artifactId>quarkus-apicurio-registry-avro</artifactId>
+</dependency>
+```
+
+```properties
+mp.messaging.incoming.prices.value.deserializer=io.apicurio.registry.serde.avro.AvroKafkaDeserializer
+mp.messaging.outgoing.prices.value.serializer=io.apicurio.registry.serde.avro.AvroKafkaSerializer
+mp.messaging.outgoing.prices.apicurio.registry.url=http://localhost:8081
+```
+
+## Full configuration example
+
+```properties
+# application.properties
+
+# Broker — only applied in prod; Dev Services handles dev/test
+%prod.kafka.bootstrap.servers=kafka:9092
+
+# Incoming channel
+mp.messaging.incoming.prices.connector=smallrye-kafka
+mp.messaging.incoming.prices.topic=price-updates
+mp.messaging.incoming.prices.value.deserializer=org.apache.kafka.common.serialization.DoubleDeserializer
+mp.messaging.incoming.prices.auto.offset.reset=earliest
+
+# Outgoing channel
+mp.messaging.outgoing.my-prices.connector=smallrye-kafka
+mp.messaging.outgoing.my-prices.topic=price-updates
+mp.messaging.outgoing.my-prices.value.serializer=org.apache.kafka.common.serialization.DoubleSerializer
+```
+
+## Dev Services for Kafka
+
+In dev mode and during tests, Quarkus automatically starts a Kafka broker using [Testcontainers](https://testcontainers.com) — no Docker configuration required. The broker address is injected into `kafka.bootstrap.servers` automatically.
+
+<Tip>
+Dev Services starts only when `kafka.bootstrap.servers` is not explicitly set (or is set only under `%prod`). You can inspect the running container in the Dev UI at `http://localhost:8080/q/dev-ui`.
+</Tip>
+
+To disable Dev Services explicitly:
+
+```properties
+quarkus.kafka.devservices.enabled=false
+```
+
+To pin the Kafka image version:
+
+```properties
+quarkus.kafka.devservices.image-name=confluentinc/cp-kafka:7.4.0
+```
+
+## Error handling
+
+If a consumer nacks a message, the connector applies a failure strategy. Configure it with `failure-strategy`:
+
+| Strategy | Behavior |
+|----------|----------|
+| `fail` (default) | Stop the application. The failed offset is not committed. |
+| `ignore` | Log the error, commit the offset, and continue. |
+| `dead-letter-queue` | Commit the offset and write the record to a dead-letter topic. |
+| `delayed-retry-topic` | Send the record to a retry topic with configurable delays. |
+
+```properties
+mp.messaging.incoming.prices.failure-strategy=dead-letter-queue
+mp.messaging.incoming.prices.dead-letter-queue.topic=prices-dlq
+```
+
+## Kafka Streams
+
+For stateful stream processing, Quarkus provides a dedicated Kafka Streams extension:
+
+```bash
+quarkus extension add kafka-streams
+```
+
+```xml
+<dependency>
+    <groupId>io.quarkus</groupId>
+    <artifactId>quarkus-kafka-streams</artifactId>
+</dependency>
+```
+
+The Kafka Streams extension lets you build `Topology` beans that Quarkus manages as part of the application lifecycle. Dev Services also covers Kafka Streams applications in dev mode.
+
+## Further reading
+
+<CardGroup cols={2}>
+  <Card title="Reactive Messaging overview" icon="diagram-project" href="/messaging">
+    Core annotations, channel wiring, and connector model for all brokers.
+  </Card>
+  <Card title="Apache Pulsar" icon="paper-plane" href="/pulsar">
+    Alternative messaging platform with multi-topic subscriptions and built-in geo-replication.
+  </Card>
+</CardGroup>
